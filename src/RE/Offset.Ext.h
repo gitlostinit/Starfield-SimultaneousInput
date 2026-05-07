@@ -2,136 +2,60 @@
 
 #include "REL/Relocation.h"
 
-// Address Library IDs the plugin hooks. IDs were originally captured against
-// Starfield 1.8.86 by Parapets. They remain valid for any subsequent runtime
-// where Bethesda did not refactor the underlying function: the AL DB shipped
-// alongside each game patch maps the same ID to the new offset.
+// Address Library IDs used by the v1.4.0 baseline measurement build.
 //
-// Verifying these IDs against a fresh runtime requires the Address Library
-// database file for that runtime (versionlib-1-15-216.bin or similar). That
-// file is not in this repo. The plugin treats each hook as best-effort at
-// load time (see SFSEPlugin.cpp): if an ID resolves to code that no longer
-// matches the expected byte pattern, that hook is skipped with a logged
-// warning instead of crashing the host.
+// Per MOD_DIRECTION.md §3 (Linus, 2026-05-06): everything except the
+// LookHandler vtable shim and the BSPCGamepadDevice::Poll byte patch is
+// retired. Hooks 3-9 either depended on the demolished
+// `ENGINE_GAMEPAD_ACTIVE` keystone hypothesis (§B-1 of critique) or, in the
+// case of hooks 8/9, shipped a type-mismatched `IsUsingGamepad` call that
+// fed garbage to a cursor-decision predicate every time stick-look was
+// active. None of those return until the §4 baseline test produces
+// evidence that justifies adding a specific one back.
 namespace RE
 {
 	namespace Offset
 	{
-		// Predicate: bool IsUsingGamepad(BSInputDeviceManager*).
-		// Used as the call target in the look/cursor patches; we substitute
-		// our own predicates by rewriting those E8 call instructions.
+		// BSPCGamepadDevice::Poll. Inside this function the engine writes
+		// `mov byte ptr [rbx+8], 1` whenever the left stick crosses its
+		// activation threshold, latching the active-device flag to the
+		// gamepad. We NOP every `C6 43 08 01` match within the bounded
+		// scan so the latch never fires from the stick.
 		//
-		// Was 178879 (Parapets, 1.8.86). In the 1.16.236 AL DB, ID 178879
-		// resolves to a debug log stub at 0x3552490 (a TLS-singleton
-		// accessor + format-and-log path), not the predicate. The
-		// predicate equivalent in 1.16.236 is at RVA 0x28cef30, which has
-		// AL ID 139340 (derived via tools/derive_function_ids.py:
-		// destination shared by 4 of 6 input-related host bodies).
-		// IsUsingGamepad calls in IMenu/UI cursor hooks resolve to a
-		// different RVA (0x002c4b50, AL TBD); Bethesda has split the
-		// predicate across cursor-vs-look subsystems in 1.16.236.
-		namespace BSInputDeviceManager
-		{
-			constexpr REL::ID IsUsingGamepad{ 139340 };
-		}
-
-		// BSPCGamepadDevice::Poll. We NOP a single mov byte ptr [rbx+8], 1
-		// so that left-stick movement no longer flags the active device
-		// as gamepad. Pattern: C6 43 08 01.
-		//
-		// Was 179249 (Parapets, 1.8.86). In the 1.16.236 AL DB, ID 179249
-		// resolves to a 42-byte thunk at 0x356e720 whose body never
-		// contains the C6 43 08 01 anchor, so the byte patch could not
-		// install. The real Poll in 1.16.236 is at vtable[470133][1] =
-		// RVA 0x2302bc0, which is AL ID 124384, with the patch anchor at
-		// offset 0x51d (was 0x2A0). Derived via
-		// tools/derive_function_ids.py with vtable + anchor scan.
+		// AL ID 124384 resolves to RVA 0x2302bc0 on Starfield 1.16.236.
+		// Two anchor sites are confirmed at +0x51D and +0x5DC (see §B-7
+		// of MOD_ARCHITECTURE_CRITIQUE.md). The runtime scanner walks the
+		// first 0x800 bytes of the function body and patches every match,
+		// so this hook survives further minor refactors without a code
+		// change.
 		namespace BSPCGamepadDevice
 		{
 			constexpr REL::ID Poll{ 124384 };
 		}
 
-		// IMenu::ShowCursor. Call at +0x14 decides whether to draw the
-		// gamepad-style cursor for menus; we redirect it to IsGamepadCursor
-		// so mouse + gamepad held simultaneously still shows the mouse cursor.
+		// PlayerControls::LookHandler vtable.
 		//
-		// Was 187256 (Parapets, 1.8.86). In the 1.16.236 AL DB, ID 187256
-		// resolves to 0x37d31f0 which is not the actual ShowCursor in
-		// 1.16.236; that function has no E8 at +0x14. The libxse-canonical
-		// IMenu vtable[475515] slot 18 is RVA 0x481e60 = AL ID 42816, which
-		// does have an E8 at +0x14 (calls 0x481d30). Derived via
-		// tools/derive_function_ids.py vtable scan + offset anchor.
-		namespace IMenu
-		{
-			constexpr REL::ID ShowCursor{ 42816 };
-		}
-
-		// Main::Run_WindowsMessageLoop. Call at +0x39 governs window cursor
-		// capture; we redirect to IsUsingThumbstickLook so the OS cursor is
-		// only confined to the window when the user is actually doing
-		// thumbstick look (not just because a controller is plugged in).
-		namespace Main
-		{
-			constexpr REL::ID Run_WindowsMessageLoop{ 149028 };
-		}
-
-		// PlayerControls::LookHandler. Vtbl is the class vtable; slot 1 is
-		// the per-event entry point we replace with a shim that splits look
-		// input by event type. Func10 +0xE is a call that gates a slow-
-		// movement-on-2-quadrants behavior.
+		// Slot 1 is `ShouldHandleEvent(const InputEvent*)`. The original
+		// implementation gates the look pipeline on whatever the engine
+		// considers the current active device; a captureless shim
+		// chains through the original, latches `UsingThumbstickLook`
+		// based on the event's `eventType`, and logs the event to a
+		// CSV. The chain-through is deliberate per §3.1: on 1.16.236
+		// the per-device-class handlers (slots 4 and 6) still exist as
+		// separate entry points, so the original may already let both
+		// stick and mouse events through. We measure first.
 		//
-		// Vtbl was 407288 (Parapets, captured against Starfield 1.8.86). On
-		// 1.16.236 that ID resolves to a non-vtable address; write_vfunc(1, ...)
-		// silently overwrites slot 1 of whatever struct lives there, which
-		// explains in-game weirdness even though the install logs as
-		// "successful" (write_vfunc has no pattern check). Replaced with the
-		// libxse canonical value for 1.16.236, sourced from
-		// external/CommonLibSF/include/RE/IDs_VTABLE.h:
-		//   inline constexpr std::array<REL::ID, 1> PlayerControls__LookHandler{ REL::ID(433589) };
-		// libxse RUNTIME_LATEST is 1.16.236 (external/CommonLibSF/include/SFSE/Version.h),
-		// so this ID is the post-refactor anchor for the 1.16.236 AL DB.
-		//
-		// Func10 (129152) is a member function AL ID, not an RTTI/vtable ID,
-		// so libxse cannot supply it. Its 1.16.236 replacement has to be
-		// re-derived via tools/derive_function_ids.ps1 against Starfield.exe
-		// + versionlib-1-16-236.bin on the gaming machine.
+		// AL 433589 is the libxse-canonical 1.16.236 ID for this vtable.
+		// The 1.8.86 fork's 407288 resolves to a non-vtable region on
+		// 1.16.236 and would silently overwrite eight bytes of unrelated
+		// data; do not regress to 407288 without re-verifying in
+		// `external/CommonLibSF/include/RE/IDs_VTABLE.h`.
 		namespace PlayerControls
 		{
 			namespace LookHandler
 			{
 				constexpr REL::ID Vtbl{ 433589 };
-				constexpr REL::ID Func10{ 129152 };
-			}
-
-			// ProcessLookInput +0x68 selects the sensitivity curve based on
-			// device. We redirect to IsUsingThumbstickLook so each device
-			// keeps its own tuned sensitivity instead of the active-device
-			// curve overriding both.
-			namespace Manager
-			{
-				constexpr REL::ID ProcessLookInput{ 129407 };
 			}
 		}
-
-		// ShipHudDataModel::PerformInputProcessing has two call sites
-		// (+0x7AF and +0x82A) that branch ship-reticle behavior on input
-		// device. Same redirect to IsUsingThumbstickLook.
-		namespace ShipHudDataModel
-		{
-			constexpr REL::ID PerformInputProcessing{ 137087 };
-		}
-
-		// UI::SetCursorStyle +0x98: pick pointer-style vs gamepad-style.
-		// Same IsGamepadCursor redirect as IMenu::ShowCursor.
-		namespace UI
-		{
-			constexpr REL::ID SetCursorStyle{ 187051 };
-		}
-
-		// UserEvents::QLook used to be looked up via AL ID and called to get
-		// the BSFixedString "Look". libxse/CommonLibSF doesn't surface
-		// RE::UserEvents, so we compare event->QUserEvent() directly against
-		// "Look"sv in SFSEPlugin.cpp instead. The function still exists in the
-		// runtime, we just don't need to call it ourselves.
 	}
 }
