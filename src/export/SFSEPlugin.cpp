@@ -10,18 +10,19 @@
 
 #include "REX/LOG.h"
 
+#include "SFSE/Logger.h"
+
 #include "RE/B/BSFixedString.h"
 #include "RE/B/BSInputEventUser.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
-#include <utility>
+#include <optional>
 
 using namespace std::string_view_literals;
 
@@ -162,20 +163,19 @@ namespace measurement
 		try {
 			g_t0 = std::chrono::steady_clock::now();
 
-			// Same dir as the spdlog plugin log: %USERPROFILE%/Documents/My
-			// Games/Starfield/SFSE/Logs/. Filename intentionally distinct
-			// from `SimultaneousInput.log` so the CSV doesn't fight the
-			// rotating spdlog sink.
-			const char* userProfile = std::getenv("USERPROFILE");
-			if (!userProfile) {
-				REX::WARN("measurement CSV disabled: %USERPROFILE% not set");
+			// Resolve via libxse's `SFSE::log::log_directory()` — the same
+			// helper SFSE::Init uses to place SimultaneousInput.log. This
+			// goes through SHGetKnownFolderPath(FOLDERID_Documents) instead
+			// of getenv("USERPROFILE"), so the CSV lands in the same
+			// directory the user already knows to look in (and avoids the
+			// `getenv` /sdl /WX deprecation).
+			const auto logDir = SFSE::log::log_directory();
+			if (!logDir) {
+				REX::WARN("measurement CSV disabled: log_directory() failed");
 				return;
 			}
-			std::filesystem::path path = std::filesystem::path(userProfile) /
-			                             "Documents" / "My Games" / "Starfield" /
-			                             "SFSE" / "Logs" /
-			                             "SimultaneousInput-events.csv";
-			std::error_code ec;
+			std::filesystem::path path = *logDir / "SimultaneousInput-events.csv";
+			std::error_code       ec;
 			std::filesystem::create_directories(path.parent_path(), ec);
 
 			g_csv.open(path, std::ios::out | std::ios::trunc);
