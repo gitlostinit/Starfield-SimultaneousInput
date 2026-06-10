@@ -33,6 +33,24 @@ namespace RE
 			constexpr REL::ID Poll{ 124384 };
 		}
 
+		// UserEvents::QLook — getter returning the interned "Look"
+		// `BSFixedString*` the engine compares user-event tags against.
+		//
+		// AL 74548 resolves to RVA 0xf9bd60 on Starfield 1.16.242. Verified
+		// by direct disasm (2026-06-09): the original
+		// `LookHandler::ShouldHandleEvent` (RVA 0x12bcd80, AL 82236) begins
+		// with `call 0xf9bd60`, then compares the result's first qword
+		// against `[event->vfunc[2](event)]` — i.e. the engine itself uses
+		// this getter plus an interned-data-pointer compare to classify an
+		// event as a Look event. The v1.5.0 force path replicates exactly
+		// that recipe. Re-verify with:
+		//   python3 tools/al_db_parser.py --db versionlib-1-16-242-0.bin \
+		//     --exe Starfield.exe  (then disasm RVA 0x12bcd80)
+		namespace UserEvents
+		{
+			constexpr REL::ID QLook{ 74548 };
+		}
+
 		// PlayerControls::LookHandler vtable.
 		//
 		// Slot 1 is `ShouldHandleEvent(const InputEvent*)`. The original

@@ -15,6 +15,7 @@
 #include "RE/B/BSFixedString.h"
 #include "RE/B/BSInputEventUser.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -121,6 +122,76 @@ namespace
 	ShouldHandleEvent_t g_origShouldHandleEvent = nullptr;
 }
 
+// === v1.5.0 force path: un-suppress the losing look device ===
+//
+// The v1.4.0 measurement (measurements/20260609, 57,585 events on 1.16.242)
+// proved the substitution point: the original `ShouldHandleEvent` never
+// accepted stick and mouse look events in the same engine tick (0 of 10,315
+// active ticks), with thumbstick acceptance collapsing to ~18% while the
+// mouse was active. Direct disasm of the original (RVA 0x12bcd80, AL 82236)
+// shows why — the whole function is:
+//
+//     accept = (event->vfunc[2](event) data-ptr == QLook() data-ptr)   // "Look" tag
+//              && event->deviceType == (modeFlags ? kGamepad : kMouse) // ONE class
+//
+// where modeFlags are a global byte at RVA 0x5f657e0 and a byte at +0x60 of
+// the object pointed to by RVA 0x5fa1c10 (1.16.242). One device class wins;
+// the other is discarded. There is no other rejection reason in the body.
+//
+// The force path replicates the engine's own Look-classification recipe
+// (same vfunc slot, same QLook getter, same interned-data-pointer compare)
+// and accepts BOTH device classes. Move-stick events ("Move" tag), buttons,
+// and UI cursor moves are untouched: they fail the Look compare exactly as
+// they do in the original.
+//
+// IF-WRONG (Linus §6.2):
+//   - vfunc index 2 wrong on a future runtime -> *crash* (wild call).
+//     Mitigation: the force path only arms when the runtime version is in
+//     kForceVerifiedRuntimes (disasm-verified). On anything else the shim
+//     degrades to the v1.4.0 measurement-only behavior.
+//   - QLook AL 74548 resolves elsewhere on a future runtime -> *no-op or
+//     crash*. Same mitigation; additionally the install path sanity-logs
+//     the resolved address.
+//   - forcing a Look event the engine would drop for a reason outside the
+//     disasm'd body (none observed on 1.16.242) -> *user-visible-glitch*
+//     (camera input in a state that vanilla ignores). The CSV `forced`
+//     column makes every such acceptance auditable after the session.
+namespace
+{
+	// Runtimes where vfunc index 2 + AL 74548 + the data-pointer compare
+	// have been verified by direct disassembly of the original function.
+	constexpr REL::Version kForceVerifiedRuntimes[] = {
+		{ 1, 16, 242, 0 },
+	};
+
+	// `QLook()` returns a BSFixedString*; its first qword is the interned
+	// `const char*` data the engine compares. We never dereference the char
+	// data itself for the accept decision — pointer identity is the engine's
+	// own semantic for interned strings.
+	using QLook_t = const char* const* (*)();
+	using QUserEventRaw_t = const char* const* (*)(const RE::InputEvent*);
+
+	QLook_t           g_qLook = nullptr;
+	std::atomic<bool> g_forceArmed{ false };
+
+	// Count of events the force path accepted that the original rejected.
+	// Surfaced in the log line at load exit and auditable per-row in the CSV.
+	std::atomic<std::uint64_t> g_forcedAccepts{ 0 };
+
+	// Engine recipe for the event's user-event tag: vfunc index 2
+	// (`call [vtbl+0x10]` in the original body). Returns nullptr when the
+	// force path is not armed.
+	const char* const* ReadUserEventTag(const RE::InputEvent* a_event)
+	{
+		if (!g_forceArmed.load(std::memory_order_relaxed) || !a_event) {
+			return nullptr;
+		}
+		const auto vtbl = *reinterpret_cast<void* const* const*>(a_event);
+		const auto fn = reinterpret_cast<QUserEventRaw_t>(vtbl[2]);
+		return fn(a_event);
+	}
+}
+
 // === CSV event-flow log ===
 // MOD_DIRECTION.md §3 (Linus's "Step 3 — quantitative additive-look
 // measurement"): one CSV row per `LookHandler::ShouldHandleEvent`
@@ -144,9 +215,15 @@ namespace
 //   timeCode: engine timeCode field on the InputEvent (+0x20)
 //   eventType: integer enum value (kButton=0, kMouseMove=1, kThumbstick=4, ...)
 //   deviceType: integer enum value (kKeyboard=0, kMouse=1, kGamepad=2, ...)
-//   userEvent: QUserEvent() ascii string ("Look", "" for non-look, etc.)
+//   userEvent: the event's user-event tag ("Look", "Move", ...) read via
+//             the engine's own recipe (vfunc index 2). The v1.4.0 build
+//             used CommonLibSF's QUserEvent(), which resolves the wrong
+//             slot on 1.16.242 and logged "" for every row; this column is
+//             only populated while the force path is armed.
 //   origReturn: 1 if the chained-through original returned true, 0 otherwise
 //   latched : the post-update value of g_usingThumbstickLook
+//   isLook  : 1 if the event carried the interned "Look" tag (engine recipe)
+//   forced  : 1 if the force path accepted an event the original rejected
 //
 // All InputEvent field offsets used here are the verified base-class layout
 // from CommonLibSF's `BSInputEventUser.h` (deviceType +0x08, eventType +0x10,
@@ -183,7 +260,7 @@ namespace measurement
 				REX::WARN("measurement CSV failed to open: {}", path.string());
 				return;
 			}
-			g_csv << "seq,wall_ms,timeCode,eventType,deviceType,userEvent,origReturn,latched\n";
+			g_csv << "seq,wall_ms,timeCode,eventType,deviceType,userEvent,origReturn,latched,isLook,forced\n";
 			g_csv.flush();
 			REX::INFO("measurement CSV opened: {}", path.string());
 		} catch (const std::exception& ex) {
@@ -198,7 +275,9 @@ namespace measurement
 		std::uint32_t       deviceType,
 		std::string_view    userEvent,
 		bool                origReturn,
-		bool                latched)
+		bool                latched,
+		bool                isLook,
+		bool                forced)
 	{
 		// Mutex-guarded line write. Worst-case throughput in the §4.2 test
 		// is ~120 events/sec (60 Hz × {stick,mouse}); contention between
@@ -215,7 +294,8 @@ namespace measurement
 		                        .count();
 		g_csv << seq << ',' << wallMs << ',' << timeCode << ','
 		      << eventType << ',' << deviceType << ',' << userEvent << ','
-		      << (origReturn ? 1 : 0) << ',' << (latched ? 1 : 0) << '\n';
+		      << (origReturn ? 1 : 0) << ',' << (latched ? 1 : 0) << ','
+		      << (isLook ? 1 : 0) << ',' << (forced ? 1 : 0) << '\n';
 		// No flush() per row: spilled events on a process crash are
 		// acceptable for a 60-second measurement run, and per-row flush
 		// hammers the input path. The OS buffer is flushed on a clean
@@ -225,16 +305,20 @@ namespace measurement
 
 // === Hook-1 shim: LookHandler vtable slot 1 ===
 // Replaces `ShouldHandleEvent` with a chain-through that:
-//   1. Logs the event to the CSV (event-flow measurement).
-//   2. Latches `g_usingThumbstickLook` based on event type.
-//   3. Calls the original implementation, returning its result unchanged.
+//   1. Calls the original implementation (preserving its side effects and
+//      capturing its verdict).
+//   2. If the original rejected the event AND the force path is armed AND
+//      the event is a mouse/gamepad Look event (classified with the
+//      engine's own recipe), accepts it anyway — this un-suppresses
+//      whichever device class the engine's mode gate discarded.
+//   3. Latches `g_usingThumbstickLook` based on event type.
+//   4. Logs the event (verdict, tag, force decision) to the CSV.
 //
-// Step 3 is the v1.4.0 behavior change vs the prior captureless-true shim
-// (MOD_DIRECTION.md §3.1). The prior shim unconditionally returned true on
-// Look events and dropped the original's filter side effects; chaining
-// through preserves them. If the original returns false the engine's
-// per-device handlers (slots 4 and 6) are bypassed for that event, which
-// is itself the data we want — the CSV will show the original's verdict.
+// Step 2 is the v1.5.0 behavior change vs the v1.4.0 measurement-only
+// shim. It is narrower than the 1.8.86 captureless-true shim in two ways:
+// the original still runs (side effects preserved), and only Look-tagged
+// events of the two look-capable device classes can be forced — buttons,
+// Move-stick, and UI cursor traffic keep the original's verdict.
 //
 // IF-WRONG (Linus §6.2):
 //   - if `g_origShouldHandleEvent` is null at call time -> not possible:
@@ -242,10 +326,10 @@ namespace measurement
 //     only be reached after a successful install.
 //   - if the original implementation has a different signature on a
 //     future runtime -> failure mode is *crash* (mismatched ABI).
-//     Mitigation: the AL DB version and PE-integrity gates promised in
-//     §3.3 will refuse to install on non-1.16.236 once added; for v1.4.0
-//     we rely on the SFSE layout-flag rejection plus an explicit AL
-//     version check at startup (logged, not enforced).
+//     Mitigation: SFSE layout-flag rejection plus the runtime-version
+//     check that arms the force path (see kForceVerifiedRuntimes).
+//   - force-path failure modes are documented on the force-path block
+//     above.
 static bool LookHandler_ShouldHandleEvent_Shim(
 	RE::PlayerControls::LookHandler* a_self,
 	const RE::InputEvent*            a_event)
@@ -257,7 +341,27 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 		origReturn = g_origShouldHandleEvent(a_self, a_event);
 	}
 
+	bool isLook = false;
+	bool forced = false;
+	const char* const* tag = nullptr;
+
 	if (a_event) {
+		// Engine recipe: tag data-pointer identity against QLook(). Only
+		// runs when the force path is armed (disasm-verified runtime).
+		tag = ReadUserEventTag(a_event);
+		if (tag && g_qLook) {
+			const auto look = g_qLook();
+			isLook = look && *tag == *look;
+		}
+
+		const auto deviceType = a_event->deviceType;
+		if (!origReturn && isLook &&
+		    (deviceType == RE::InputEvent::DeviceType::kMouse ||
+		     deviceType == RE::InputEvent::DeviceType::kGamepad)) {
+			forced = true;
+			g_forcedAccepts.fetch_add(1, std::memory_order_relaxed);
+		}
+
 		const auto eventType = a_event->eventType;
 		if (eventType == RE::InputEvent::EventType::kMouseMove) {
 			g_usingThumbstickLook.store(false, std::memory_order_relaxed);
@@ -265,23 +369,22 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 			g_usingThumbstickLook.store(true, std::memory_order_relaxed);
 		}
 
-		// QUserEvent() reads the event's user-event tag (`BSFixedString`).
-		// On non-IDEvent subclasses it returns an empty string. Copying
-		// out the c_str pointer is safe inside the shim window because
-		// the engine retains ownership of the event for the duration of
-		// the dispatch.
-		const auto userEvent = a_event->QUserEvent();
+		// The tag's interned char data is stable for the process lifetime
+		// (BSFixedString pool); logging it is safe outside the dispatch
+		// window.
 		measurement::LogEvent(
 			seq,
 			a_event->timeCode,
 			static_cast<std::uint32_t>(eventType),
 			static_cast<std::uint32_t>(a_event->deviceType),
-			std::string_view{ userEvent.c_str() ? userEvent.c_str() : "" },
+			std::string_view{ (tag && *tag) ? *tag : "" },
 			origReturn,
-			g_usingThumbstickLook.load(std::memory_order_relaxed));
+			g_usingThumbstickLook.load(std::memory_order_relaxed),
+			isLook,
+			forced);
 	}
 
-	return origReturn;
+	return origReturn || forced;
 }
 
 namespace
@@ -304,9 +407,10 @@ namespace
 			runtimeVer.string("."sv));
 
 		REX::INFO(
-			"v1.4.0 baseline measurement build: 2 hooks active "
-			"(LookHandler vtable shim, BSPCGamepadDevice::Poll byte patch). "
-			"7 hooks retired pending evidence; see MOD_DIRECTION.md §3-4.");
+			"v1.5.0 un-suppress build: 2 hooks active "
+			"(LookHandler vtable shim + force path, BSPCGamepadDevice::Poll "
+			"byte patch). 7 hooks retired pending evidence; see "
+			"MOD_DIRECTION.md §3-4 and MAINTAINING.md §8.");
 
 		// Highest runtime CommonLibSF advertises support for. Out-of-range is
 		// not a hard failure (AL IDs are evaluated at runtime against the
@@ -339,6 +443,47 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	LogRuntimeProbe(a_sfse);
 
 	measurement::Open();
+
+	// === v1.5.0 force-path arming ===
+	// The force path performs a raw vfunc call (index 2) on every rejected
+	// event plus an AL-resolved QLook() call. Both are verified by direct
+	// disassembly ONLY on the runtimes listed in kForceVerifiedRuntimes; on
+	// anything else the shim runs in v1.4.0 measurement-only mode and says
+	// so in the log.
+	{
+		const auto runtimeVer = a_sfse->RuntimeVersion();
+		const bool verified = std::find(
+		                          std::begin(kForceVerifiedRuntimes),
+		                          std::end(kForceVerifiedRuntimes),
+		                          runtimeVer) != std::end(kForceVerifiedRuntimes);
+		if (verified) {
+			try {
+				REL::Relocation<QLook_t> qLook(RE::Offset::UserEvents::QLook);
+				g_qLook = qLook.get();
+				g_forceArmed.store(true, std::memory_order_relaxed);
+				REX::INFO(
+					"force path armed: runtime {} is disasm-verified; QLook (AL {}) "
+					"resolved to {:#x}. rejected mouse/gamepad Look events will be "
+					"accepted (un-suppression on).",
+					runtimeVer.string("."sv),
+					RE::Offset::UserEvents::QLook.id(),
+					reinterpret_cast<std::uintptr_t>(g_qLook));
+			} catch (const std::exception& ex) {
+				REX::WARN(
+					"force path NOT armed: QLook resolution failed ({}). "
+					"running in measurement-only mode.",
+					ex.what());
+			}
+		} else {
+			REX::WARN(
+				"force path NOT armed: runtime {} has no disasm verification "
+				"for the Look-tag recipe (vfunc index 2 + QLook AL {}). "
+				"running in v1.4.0 measurement-only mode; re-derive per "
+				"MAINTAINING.md §8 to enable.",
+				runtimeVer.string("."sv),
+				RE::Offset::UserEvents::QLook.id());
+		}
+	}
 
 	// === Hook 1: LookHandler vtable slot 1 chain-through shim ===
 	// Replaces `ShouldHandleEvent`. The shim chains through the original
@@ -418,14 +563,16 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	const auto patchedSites = g_byteSitesPatched.load();
 	if (skipped == 0) {
 		REX::INFO(
-			"v1.4.0 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
-			"installed at {} site(s). shim invocations so far: {}. "
-			"play, then return SimultaneousInput-events.csv for analysis.",
+			"v1.5.0 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
+			"installed at {} site(s), force path {}. shim invocations so far: {}. "
+			"play, then return SimultaneousInput-events.csv for analysis "
+			"(forced-accept count is in the 'forced' column).",
 			patchedSites,
+			g_forceArmed.load(std::memory_order_relaxed) ? "ARMED" : "off (measurement-only)",
 			g_shimInvocations.load(std::memory_order_relaxed));
 	} else {
 		REX::WARN(
-			"v1.4.0 partial: {}/{} hooks installed, {} skipped. plugin will "
+			"v1.5.0 partial: {}/{} hooks installed, {} skipped. plugin will "
 			"run with reduced behavior; see warnings above.",
 			installed,
 			installed + skipped,

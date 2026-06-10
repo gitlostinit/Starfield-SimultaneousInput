@@ -144,3 +144,77 @@ pass: identify the analogous code paths (Bethesda likely inlined or moved
 the device-active check), then either choose a new patch site or restructure
 the mod's hook strategy. That work is out of scope for a per-patch
 maintenance pass and is tracked separately.
+
+## 8. Starfield 1.16.242 — measured substitution point and the v1.5.0 force path
+
+Context recovered 2026-06-09/10. SFSE never loaded on anthony-gaming before
+2026-06-09 because `sfse_loader.exe` was a renamed copy of `Starfield.exe`
+(found and repaired in the OpenClaw `#gaming` session; backups under
+`MateoBackup-SFSE-20260609-172801`). Every prior "the mod does nothing"
+observation predating that repair is void: the plugin was never in the
+process.
+
+### 8.1 What the v1.4.0 measurement proved on 1.16.242
+
+The v1.4.0 baseline build (commit 5e2bae0, built by CI 2026-05-07) installs
+both hooks cleanly on 1.16.242 — the vtable layout and both `C6 43 08 01`
+Poll anchors (+0x51D, +0x5DC) survived the patch. A 17-minute session
+(2026-06-09, 57,585 events, `measurements/20260609/`) showed:
+
+- Both device classes flow through the shim simultaneously (382 of 550
+  half-second windows contained both stick and mouse events).
+- The original `ShouldHandleEvent` NEVER accepted both classes in the same
+  engine tick (0 of 10,315 active ticks). Thumbstick acceptance was 15-18%
+  overall; mouse ~51%. Substitution, not addition — MOD_DIRECTION §4.4
+  row 4 ("Phase 2-C").
+- The `userEvent` CSV column read "" for every row. Root cause: CommonLibSF
+  declares `InputEvent::QUserEvent()` returning `BSFixedString` BY VALUE;
+  the engine vfunc returns a `BSFixedString*` in RAX. ABI mismatch, garbage
+  copy. Do not trust `QUserEvent()` on 1.16.x.
+
+### 8.2 The disassembled gate (1.16.242)
+
+`LookHandler::ShouldHandleEvent` (RVA 0x12bcd80, AL 82236) is, in full:
+
+    accept = (event->vfunc[2](event) data ptr == QLook() data ptr)  // "Look" tag
+             && event->deviceType == (mode ? kGamepad : kMouse)     // ONE class
+
+where `mode` derives from a global byte at RVA 0x5f657e0 (no AL ID) and a
+byte at +0x60 of the object at RVA 0x5fa1c10 (no AL ID). `QLook` is
+AL 74548 (RVA 0xf9bd60), a TLS-guard-initialized singleton getter. The
+vtable (AL 433589) slots: 1 = ShouldHandleEvent (AL 82236),
+4 = OnThumbstick (AL 82237), 6 = OnMouseMove (AL 82238).
+
+Re-verify with `tools/al_db_parser.py` against the 1.16.242 exe + AL DB,
+then capstone-disasm RVA 0x12bcd80 (0x6b bytes). The whole §8 stands or
+falls on that one function body.
+
+### 8.3 v1.5.0
+
+The shim chains through the original, and if the original rejected a
+mouse/gamepad event that carries the interned "Look" tag (checked with the
+engine's own recipe: vfunc index 2 + AL 74548 + data-pointer identity), it
+accepts it. Buttons, Move-stick, and cursor traffic keep the original
+verdict. The force path arms ONLY on runtimes listed in
+`kForceVerifiedRuntimes` (currently 1.16.242.0 alone); anywhere else the
+build degrades to v1.4.0 measurement-only behavior. CSV gains `isLook` and
+`forced` columns; the `userEvent` column is now populated via the raw
+recipe instead of the broken `QUserEvent()`.
+
+Field motivation (2026-06-09 Steam Deck test): gyro-as-mouse required a
+keyboard-hold "wake" workaround, which flips the mode gate to KBM — right
+stick look dies and left-stick analog movement goes sluggish. With both
+look classes force-accepted, no wake input is needed and the engine can
+stay in gamepad mode: analog movement untouched, right stick native, gyro
+mouse deltas accepted. That is the experiment v1.5.0 ships.
+
+### 8.4 Do NOT redeploy old all-hooks DLLs
+
+`SimultaneousInput.dll.v140-tmp-bak` (an allhooks-era build) was A/B-tested
+on 1.16.242 on 2026-06-09 and crashed Starfield before SFSE produced logs.
+The upstream v1.0.3 source ("fullhooks") was also rebuilt against the
+1.16.242 AL DB on anthony-gaming (`Downloads\Starfield-SimultaneousInput-
+build\...\build-fullhooks\Release\SimultaneousInput.dll`, built 21:03) but
+was never deployed — its 1.8.86-era byte offsets (+0x2A0, +0x0E, +0x68, …)
+do not exist on 1.16.242 (§7 table, unchanged by the 242 patch), and its
+`match_or_fail` on `Run_WindowsMessageLoop` aborts the load. Leave it.

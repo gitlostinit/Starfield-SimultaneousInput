@@ -1,0 +1,11 @@
+[17:38:59.141] [43820] [I] SimultaneousInput v1.4.0.0
+[17:38:59.141] [43820] [I] SimultaneousInput v1.4.0.0 (build 5e2bae05df93 2026-05-07T04:07:51Z)
+[17:38:59.141] [43820] [I] SFSE 0.2.20.0 loaded against Starfield runtime 1.16.242.0
+[17:38:59.141] [43820] [I] v1.4.0 baseline measurement build: 2 hooks active (LookHandler vtable shim, BSPCGamepadDevice::Poll byte patch). 7 hooks retired pending evidence; see MOD_DIRECTION.md §3-4.
+[17:38:59.141] [43820] [W] runtime 1.16.242.0 is newer than the latest tested (1.16.236.0). hook 1 (vtable shim) and hook 2 (byte scan) are pattern-resilient but ABI changes will surface as crashes; if you are seeing crashes on a newer runtime, uninstall this plugin and report the runtime version in the issue.
+[17:38:59.142] [43820] [I] measurement CSV opened: C:\Users\Anthony\Documents\My Games\Starfield\SFSE\Logs\SimultaneousInput-events.csv
+[17:38:59.142] [43820] [I] hook 1 installed: LookHandler vtable slot 1 shim (orig 0x7ff6747acd80 chained through)
+[17:38:59.142] [43820] [I] hook 2 patched site: BSPCGamepadDevice::Poll +0x51d
+[17:38:59.142] [43820] [I] hook 2 patched site: BSPCGamepadDevice::Poll +0x5dc
+[17:38:59.142] [43820] [I] hook 2 installed: BSPCGamepadDevice::Poll patched 2 site(s)
+[17:38:59.142] [43820] [I] v1.4.0 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) installed at 2 site(s). shim invocations so far: 0. play, then return SimultaneousInput-events.csv for analysis.
