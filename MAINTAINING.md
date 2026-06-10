@@ -333,3 +333,16 @@ v1.5.7 applies the clamp to MouseMove regardless of whether vanilla accepted it
 or the shim forced it; suppresses CursorMove even when vanilla accepts it; and
 after mouse-look handling writes the verified mode-gate bytes back to gamepad
 (`1`) to avoid leaving the game in a KBM/mouse state that degrades sticks.
+
+### 8.12 v1.5.8 — low-gain mouse injection (2026-06-10)
+
+Anthony tested v1.5.7 and reported gyro was still yanked badly, way too
+sensitive, and fought right-stick aiming/fine tuning. The v1.5.7 CSV showed
+CursorMove was suppressed (`origReturn=0`, `forced=0`) and MouseMove was clamped
+(x +/-4, y +/-2), with no large raw spikes surviving in the logged payload.
+Therefore the remaining issue is likely the forced mouse stream being too hot
+and fighting the native stick path, not one-off unbounded CursorMove spikes.
+
+v1.5.8 changes the MouseMove attenuation from /8 with +/-1 preservation to a
+low-gain path: X is `/24` clamped to +/-2, Y is `/32` clamped to +/-1, and tiny
+nonzero deltas are allowed to drop to zero. CursorMove remains suppressed.
