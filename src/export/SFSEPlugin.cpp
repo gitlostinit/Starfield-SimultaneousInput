@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -243,6 +244,36 @@ namespace measurement
 	std::mutex                g_csvMutex;
 	std::chrono::steady_clock::time_point g_t0;
 
+	struct RawProbe
+	{
+		std::uint64_t q28{ 0 };
+		std::uint64_t q30{ 0 };
+		std::uint64_t q38{ 0 };
+		std::uint64_t q40{ 0 };
+		float         f28{ 0.0F };
+		float         f2c{ 0.0F };
+		float         f30{ 0.0F };
+		float         f34{ 0.0F };
+	};
+
+	RawProbe ProbeRaw(const RE::InputEvent* event)
+	{
+		RawProbe out{};
+		if (!event) {
+			return out;
+		}
+		const auto* base = reinterpret_cast<const std::byte*>(event);
+		std::memcpy(&out.q28, base + 0x28, sizeof(out.q28));
+		std::memcpy(&out.q30, base + 0x30, sizeof(out.q30));
+		std::memcpy(&out.q38, base + 0x38, sizeof(out.q38));
+		std::memcpy(&out.q40, base + 0x40, sizeof(out.q40));
+		std::memcpy(&out.f28, base + 0x28, sizeof(out.f28));
+		std::memcpy(&out.f2c, base + 0x2C, sizeof(out.f2c));
+		std::memcpy(&out.f30, base + 0x30, sizeof(out.f30));
+		std::memcpy(&out.f34, base + 0x34, sizeof(out.f34));
+		return out;
+	}
+
 	void Open()
 	{
 		try {
@@ -268,7 +299,7 @@ namespace measurement
 				REX::WARN("measurement CSV failed to open: {}", path.string());
 				return;
 			}
-			g_csv << "seq,wall_ms,timeCode,eventType,deviceType,userEvent,origReturn,latched,isLook,forced\n";
+			g_csv << "seq,wall_ms,timeCode,eventType,deviceType,userEvent,origReturn,latched,isLook,forced,q28,q30,q38,q40,f28,f2c,f30,f34\n";
 			g_csv.flush();
 			REX::INFO("measurement CSV opened: {}", path.string());
 		} catch (const std::exception& ex) {
@@ -285,7 +316,8 @@ namespace measurement
 		bool                origReturn,
 		bool                latched,
 		bool                isLook,
-		bool                forced)
+		bool                forced,
+		RawProbe            raw)
 	{
 		// Mutex-guarded line write. Worst-case throughput in the §4.2 test
 		// is ~120 events/sec (60 Hz × {stick,mouse}); contention between
@@ -303,7 +335,9 @@ namespace measurement
 		g_csv << seq << ',' << wallMs << ',' << timeCode << ','
 		      << eventType << ',' << deviceType << ',' << userEvent << ','
 		      << (origReturn ? 1 : 0) << ',' << (latched ? 1 : 0) << ','
-		      << (isLook ? 1 : 0) << ',' << (forced ? 1 : 0) << '\n';
+		      << (isLook ? 1 : 0) << ',' << (forced ? 1 : 0) << ','
+		      << raw.q28 << ',' << raw.q30 << ',' << raw.q38 << ',' << raw.q40 << ','
+		      << raw.f28 << ',' << raw.f2c << ',' << raw.f30 << ',' << raw.f34 << '\n';
 		// No flush() per row: spilled events on a process crash are
 		// acceptable for a 60-second measurement run, and per-row flush
 		// hammers the input path. The OS buffer is flushed on a clean
@@ -366,7 +400,7 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 
 	bool origReturn = false;
 	if (g_origShouldHandleEvent) {
-		// v1.5.3: do not blindly force mouse-look after vanilla rejects it.
+		// v1.5.4 measurement: do not blindly force mouse-look after vanilla rejects it.
 		// Instead, for verified mouse Look events, temporarily present the
 		// disassembled mode gate as "mouse mode" while calling the original,
 		// then restore the game's prior mode bytes immediately. The goal is to
@@ -435,7 +469,8 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 			origReturn,
 			g_usingThumbstickLook.load(std::memory_order_relaxed),
 			isLook,
-			forced);
+			forced,
+			measurement::ProbeRaw(a_event));
 	}
 
 	return origReturn || forced;
@@ -461,7 +496,7 @@ namespace
 			runtimeVer.string("."sv));
 
 		REX::INFO(
-			"v1.5.3 mouse-mode-spoof build: 2 hooks active "
+			"v1.5.4 raw-payload measurement build: 2 hooks active "
 			"(LookHandler vtable shim + force path, BSPCGamepadDevice::Poll "
 			"byte patch). 7 hooks retired pending evidence; see "
 			"MOD_DIRECTION.md §3-4 and MAINTAINING.md §8.");
@@ -627,7 +662,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	const auto patchedSites = g_byteSitesPatched.load();
 	if (skipped == 0) {
 		REX::INFO(
-			"v1.5.3 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
+			"v1.5.4 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
 			"installed at {} site(s), force path {}. shim invocations so far: {}. "
 			"play, then return SimultaneousInput-events.csv for analysis "
 			"(forced-accept count is in the 'forced' column).",
@@ -636,7 +671,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			g_shimInvocations.load(std::memory_order_relaxed));
 	} else {
 		REX::WARN(
-			"v1.5.3 partial: {}/{} hooks installed, {} skipped. plugin will "
+			"v1.5.4 partial: {}/{} hooks installed, {} skipped. plugin will "
 			"run with reduced behavior; see warnings above.",
 			installed,
 			installed + skipped,

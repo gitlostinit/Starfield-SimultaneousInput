@@ -277,3 +277,16 @@ If this restores gyro without spaz, the root cause was bypassing vanilla's
 accept-side effects. If it still spazzes, the issue is downstream of
 `ShouldHandleEvent` and the next step is payload logging / lower-level merge
 work around `OnMouseMoveEvent` rather than this gate.
+
+### 8.8 v1.5.4 — raw input payload measurement (2026-06-10)
+
+Anthony tested v1.5.3 and reported no gyro. Fresh CSV showed the mode-spoof
+attempt still left all MouseMove/Mouse/Look rows rejected, so the verified mode
+bytes are not sufficient to make vanilla accept that path in the live call.
+
+v1.5.4 keeps behavior conservative and adds raw payload columns for each event:
+`q28,q30,q38,q40,f28,f2c,f30,f34`. These are deliberately dumb reads from the
+first subclass payload bytes after `InputEvent` (base size 0x28). A short gyro
+wiggle should show whether MouseMove and CursorMove carry sane deltas, absolute
+positions, accumulated drift, or some other shape. Use this before attempting an
+`OnMouseMoveEvent` hook, synthetic event, or payload normalization.
