@@ -290,3 +290,20 @@ first subclass payload bytes after `InputEvent` (base size 0x28). A short gyro
 wiggle should show whether MouseMove and CursorMove carry sane deltas, absolute
 positions, accumulated drift, or some other shape. Use this before attempting an
 `OnMouseMoveEvent` hook, synthetic event, or payload normalization.
+
+### 8.9 v1.5.5 — attenuated MouseMove force test (2026-06-10)
+
+v1.5.4 payload data showed MouseMove and CursorMove both carry payload at
+`+0x38`, but with different semantics:
+
+- MouseMove: packed signed 32-bit deltas (low=x, high=y), e.g. `(-1,-2)`,
+  `(-7,-4)`, `(-5,6)`.
+- CursorMove: packed absolute cursor position, e.g. around `(1278,799)` and
+  drifting.
+- Thumbstick: packed floats in the same qword.
+
+This confirms CursorMove should stay rejected and MouseMove is the only viable
+gyro path seen by this hook. v1.5.5 force-accepts rejected MouseMove/Mouse/Look
+again, but first divides its packed x/y deltas by 8 (preserving +/-1 for
+nonzero tiny deltas). This tests whether v1.5.1's "works but spazzes" result
+was magnitude/scaling/accumulation rather than event identity.

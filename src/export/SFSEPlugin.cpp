@@ -274,6 +274,35 @@ namespace measurement
 		return out;
 	}
 
+	std::int32_t AttenuateDelta(std::int32_t value)
+	{
+		if (value == 0) {
+			return 0;
+		}
+		const auto scaled = value / 8;
+		if (scaled == 0) {
+			return value > 0 ? 1 : -1;
+		}
+		return scaled;
+	}
+
+	void AttenuateMouseMove(RE::InputEvent* event)
+	{
+		if (!event) {
+			return;
+		}
+		auto* base = reinterpret_cast<std::byte*>(event);
+		std::uint64_t packed = 0;
+		std::memcpy(&packed, base + 0x38, sizeof(packed));
+		auto x = static_cast<std::int32_t>(packed & 0xffffffffULL);
+		auto y = static_cast<std::int32_t>((packed >> 32) & 0xffffffffULL);
+		x = AttenuateDelta(x);
+		y = AttenuateDelta(y);
+		packed = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(y)) << 32) |
+		         static_cast<std::uint32_t>(x);
+		std::memcpy(base + 0x38, &packed, sizeof(packed));
+	}
+
 	void Open()
 	{
 		try {
@@ -432,14 +461,20 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 	}
 
 	if (a_event) {
-		// v1.5.3 removes the v1.5.0/v1.5.1 blind MouseMove force path.
-		// If vanilla still rejects a mouse event after mode spoofing, keep the
-		// rejection. Thumbstick force remains available only as a fallback, but
-		// in the v1.5.2 test the rejected thumbstick rows were Move-tagged, not
-		// Look-tagged, so this should normally stay zero.
+		// v1.5.5: restore MouseMove forcing, but attenuate the packed signed
+		// delta payload at +0x38 first. v1.5.4 proved MouseMove carries sane
+		// small X/Y deltas there; v1.5.1 proved raw forced MouseMove moves the
+		// camera but spazzes. This tests whether the bad behavior is magnitude /
+		// scaling rather than event identity. CursorMove remains rejected.
 		if (!origReturn && isLook &&
-		    eventType == RE::InputEvent::EventType::kThumbstick &&
-		    deviceType == RE::InputEvent::DeviceType::kGamepad) {
+		    eventType == RE::InputEvent::EventType::kMouseMove &&
+		    deviceType == RE::InputEvent::DeviceType::kMouse) {
+			measurement::AttenuateMouseMove(const_cast<RE::InputEvent*>(a_event));
+			forced = true;
+			g_forcedAccepts.fetch_add(1, std::memory_order_relaxed);
+		} else if (!origReturn && isLook &&
+		           eventType == RE::InputEvent::EventType::kThumbstick &&
+		           deviceType == RE::InputEvent::DeviceType::kGamepad) {
 			forced = true;
 			g_forcedAccepts.fetch_add(1, std::memory_order_relaxed);
 		}
@@ -496,7 +531,7 @@ namespace
 			runtimeVer.string("."sv));
 
 		REX::INFO(
-			"v1.5.4 raw-payload measurement build: 2 hooks active "
+			"v1.5.5 attenuated-MouseMove build: 2 hooks active "
 			"(LookHandler vtable shim + force path, BSPCGamepadDevice::Poll "
 			"byte patch). 7 hooks retired pending evidence; see "
 			"MOD_DIRECTION.md §3-4 and MAINTAINING.md §8.");
@@ -662,7 +697,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	const auto patchedSites = g_byteSitesPatched.load();
 	if (skipped == 0) {
 		REX::INFO(
-			"v1.5.4 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
+			"v1.5.5 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
 			"installed at {} site(s), force path {}. shim invocations so far: {}. "
 			"play, then return SimultaneousInput-events.csv for analysis "
 			"(forced-accept count is in the 'forced' column).",
@@ -671,7 +706,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			g_shimInvocations.load(std::memory_order_relaxed));
 	} else {
 		REX::WARN(
-			"v1.5.4 partial: {}/{} hooks installed, {} skipped. plugin will "
+			"v1.5.5 partial: {}/{} hooks installed, {} skipped. plugin will "
 			"run with reduced behavior; see warnings above.",
 			installed,
 			installed + skipped,
