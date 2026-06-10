@@ -355,23 +355,20 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 			isLook = look && *tag == *look;
 		}
 
-		// v1.5.1: force ONLY kMouseMove and kThumbstick. The 2026-06-10
-		// session (measurements/20260610) showed the mouse emits BOTH a
-		// MouseMove and a Look-tagged CursorMove per motion; v1.5.0 forced
-		// both, double-feeding the look pipeline every frame (2,143 of
-		// 3,346 frames). In gamepad mode the OS cursor is not captured at
-		// screen center, so the CursorMove path carries unbounded drifted
-		// positions — observed in-game as violent camera "spazzing" that
-		// scales with accumulated motion. CursorMove now always keeps the
-		// original's verdict (vanilla handles it correctly in the mode
-		// where it matters).
+		// v1.5.2 diagnostic: force ONLY kThumbstick. The 2026-06-10
+		// v1.5.1 test proved the CursorMove exclusion worked (CursorMove rows
+		// were no longer forced), but the camera still spazzed while 1,621
+		// rejected kMouseMove/Mouse/Look events were force-accepted. That
+		// means the remaining bad path is forced MouseMove itself, or a lower
+		// engine layer reached by that acceptance. Keep mouse traffic on the
+		// original verdict and leave gamepad Look un-suppression available so
+		// this build can answer the next question cleanly: does disabling the
+		// forced mouse path stop the violent camera behavior?
 		const auto deviceType = a_event->deviceType;
 		const auto eventType = a_event->eventType;
 		if (!origReturn && isLook &&
-		    ((eventType == RE::InputEvent::EventType::kMouseMove &&
-		      deviceType == RE::InputEvent::DeviceType::kMouse) ||
-		     (eventType == RE::InputEvent::EventType::kThumbstick &&
-		      deviceType == RE::InputEvent::DeviceType::kGamepad))) {
+		    eventType == RE::InputEvent::EventType::kThumbstick &&
+		    deviceType == RE::InputEvent::DeviceType::kGamepad) {
 			forced = true;
 			g_forcedAccepts.fetch_add(1, std::memory_order_relaxed);
 		}
@@ -427,7 +424,7 @@ namespace
 			runtimeVer.string("."sv));
 
 		REX::INFO(
-			"v1.5.1 un-suppress build: 2 hooks active "
+			"v1.5.2 diagnostic build: 2 hooks active "
 			"(LookHandler vtable shim + force path, BSPCGamepadDevice::Poll "
 			"byte patch). 7 hooks retired pending evidence; see "
 			"MOD_DIRECTION.md §3-4 and MAINTAINING.md §8.");
@@ -583,7 +580,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	const auto patchedSites = g_byteSitesPatched.load();
 	if (skipped == 0) {
 		REX::INFO(
-			"v1.5.1 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
+			"v1.5.2 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
 			"installed at {} site(s), force path {}. shim invocations so far: {}. "
 			"play, then return SimultaneousInput-events.csv for analysis "
 			"(forced-accept count is in the 'forced' column).",
@@ -592,7 +589,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			g_shimInvocations.load(std::memory_order_relaxed));
 	} else {
 		REX::WARN(
-			"v1.5.1 partial: {}/{} hooks installed, {} skipped. plugin will "
+			"v1.5.2 partial: {}/{} hooks installed, {} skipped. plugin will "
 			"run with reduced behavior; see warnings above.",
 			installed,
 			installed + skipped,

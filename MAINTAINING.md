@@ -233,3 +233,25 @@ motion, matching the report. v1.5.1 forces only kMouseMove (mouse) and
 kThumbstick (gamepad); kCursorMove always keeps the original verdict.
 Also: CSV `userEvent` now logs the tag qword as hex (the interned token is
 not guaranteed printable; the 06-10 CSV contained raw binary).
+
+### 8.6 v1.5.2 — no forced MouseMove diagnostic (2026-06-10)
+
+Anthony's v1.5.1 field test still produced violent gyro/camera spaz. Fresh
+log confirmed v1.5.1.0 build `5e5b26814c80` was loaded and force path ARMED.
+The CSV showed:
+
+- 1,621 forced accepts, all `(eventType=1 kMouseMove, deviceType=1 kMouse, origReturn=0)`
+- 1,346 CursorMove rows, all rejected (`forced=0, origReturn=0`)
+- 953 native accepted Thumbstick rows and 515 rejected Thumbstick rows
+
+So the v1.5.1 CursorMove exclusion did what it said, but the symptom survived.
+The remaining high-probability cause is not CursorMove drift; it is accepting
+MouseMove through this `ShouldHandleEvent` gate while the engine is otherwise in
+gamepad mode, or a lower-level mouse-delta path reached by that acceptance.
+
+v1.5.2 is intentionally diagnostic and conservative: it disables forced
+MouseMove entirely and only force-accepts rejected gamepad Thumbstick Look
+traffic. If the spaz disappears, the next real fix must move below this gate
+and merge/scale mouse deltas correctly instead of blindly accepting MouseMove
+at `ShouldHandleEvent`. If the spaz remains, the fault is outside the force
+path and the CSV/log should prove it by showing `forced=0` for mouse rows.
