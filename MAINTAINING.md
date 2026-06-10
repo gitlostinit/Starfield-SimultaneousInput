@@ -307,3 +307,14 @@ gyro path seen by this hook. v1.5.5 force-accepts rejected MouseMove/Mouse/Look
 again, but first divides its packed x/y deltas by 8 (preserving +/-1 for
 nonzero tiny deltas). This tests whether v1.5.1's "works but spazzes" result
 was magnitude/scaling/accumulation rather than event identity.
+
+### 8.10 v1.5.6 — clamp attenuated MouseMove spikes (2026-06-10)
+
+Anthony tested v1.5.5: much improved and generally stable while moving, but
+occasional jarring snap/grab to floor or ceiling while panning. The v1.5.5 CSV
+matched that: after /8 scaling, most forced MouseMove deltas were tiny
+(p95 abs x=2, p95 abs y=1; p99 abs x/y=3), but a rare early spike survived as
+`x=10,y=14` post-scale. That is exactly the kind of vertical yank reported.
+
+v1.5.6 keeps the /8 attenuation but clamps post-scale MouseMove deltas to
+`x = +/-4`, `y = +/-2`. CursorMove still remains rejected.
