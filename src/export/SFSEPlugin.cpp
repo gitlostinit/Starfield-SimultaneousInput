@@ -175,6 +175,13 @@ namespace
 	QLook_t           g_qLook = nullptr;
 	std::atomic<bool> g_forceArmed{ false };
 
+	// v1.5.3: verified 1.16.242 mode-gate bytes from MAINTAINING.md §8.2.
+	// `mode == false` is the mouse-accepted branch in LookHandler::ShouldHandleEvent;
+	// `mode == true` is the gamepad-accepted branch. These are intentionally
+	// runtime-gated with the rest of the force path.
+	std::uint8_t* g_inputModeGlobal = nullptr;       // RVA 0x5f657e0
+	std::uint8_t* g_inputModeObjectByte = nullptr;   // *RVA 0x5fa1c10 + 0x60
+
 	// Count of events the force path accepted that the original rejected.
 	// Surfaced in the log line at load exit and auditable per-row in the CSV.
 	std::atomic<std::uint64_t> g_forcedAccepts{ 0 };
@@ -337,16 +344,17 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 {
 	const auto seq = g_shimInvocations.fetch_add(1, std::memory_order_relaxed) + 1;
 
-	bool origReturn = false;
-	if (g_origShouldHandleEvent) {
-		origReturn = g_origShouldHandleEvent(a_self, a_event);
-	}
-
 	bool isLook = false;
 	bool forced = false;
 	const char* const* tag = nullptr;
 
+	RE::InputEvent::DeviceType deviceType = RE::InputEvent::DeviceType::kNone;
+	RE::InputEvent::EventType  eventType = RE::InputEvent::EventType::kNone;
+
 	if (a_event) {
+		deviceType = a_event->deviceType;
+		eventType = a_event->eventType;
+
 		// Engine recipe: tag data-pointer identity against QLook(). Only
 		// runs when the force path is armed (disasm-verified runtime).
 		tag = ReadUserEventTag(a_event);
@@ -354,18 +362,47 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 			const auto look = g_qLook();
 			isLook = look && *tag == *look;
 		}
+	}
 
-		// v1.5.2 diagnostic: force ONLY kThumbstick. The 2026-06-10
-		// v1.5.1 test proved the CursorMove exclusion worked (CursorMove rows
-		// were no longer forced), but the camera still spazzed while 1,621
-		// rejected kMouseMove/Mouse/Look events were force-accepted. That
-		// means the remaining bad path is forced MouseMove itself, or a lower
-		// engine layer reached by that acceptance. Keep mouse traffic on the
-		// original verdict and leave gamepad Look un-suppression available so
-		// this build can answer the next question cleanly: does disabling the
-		// forced mouse path stop the violent camera behavior?
-		const auto deviceType = a_event->deviceType;
-		const auto eventType = a_event->eventType;
+	bool origReturn = false;
+	if (g_origShouldHandleEvent) {
+		// v1.5.3: do not blindly force mouse-look after vanilla rejects it.
+		// Instead, for verified mouse Look events, temporarily present the
+		// disassembled mode gate as "mouse mode" while calling the original,
+		// then restore the game's prior mode bytes immediately. The goal is to
+		// let vanilla's own accept path and side effects run for MouseMove while
+		// preserving gamepad mode for analog movement outside this tiny window.
+		const bool spoofMouseMode =
+			g_forceArmed.load(std::memory_order_relaxed) &&
+			isLook &&
+			eventType == RE::InputEvent::EventType::kMouseMove &&
+			deviceType == RE::InputEvent::DeviceType::kMouse &&
+			g_inputModeGlobal &&
+			g_inputModeObjectByte;
+
+		std::uint8_t oldGlobal = 0;
+		std::uint8_t oldObject = 0;
+		if (spoofMouseMode) {
+			oldGlobal = *g_inputModeGlobal;
+			oldObject = *g_inputModeObjectByte;
+			*g_inputModeGlobal = 0;
+			*g_inputModeObjectByte = 0;
+		}
+
+		origReturn = g_origShouldHandleEvent(a_self, a_event);
+
+		if (spoofMouseMode) {
+			*g_inputModeGlobal = oldGlobal;
+			*g_inputModeObjectByte = oldObject;
+		}
+	}
+
+	if (a_event) {
+		// v1.5.3 removes the v1.5.0/v1.5.1 blind MouseMove force path.
+		// If vanilla still rejects a mouse event after mode spoofing, keep the
+		// rejection. Thumbstick force remains available only as a fallback, but
+		// in the v1.5.2 test the rejected thumbstick rows were Move-tagged, not
+		// Look-tagged, so this should normally stay zero.
 		if (!origReturn && isLook &&
 		    eventType == RE::InputEvent::EventType::kThumbstick &&
 		    deviceType == RE::InputEvent::DeviceType::kGamepad) {
@@ -424,7 +461,7 @@ namespace
 			runtimeVer.string("."sv));
 
 		REX::INFO(
-			"v1.5.2 diagnostic build: 2 hooks active "
+			"v1.5.3 mouse-mode-spoof build: 2 hooks active "
 			"(LookHandler vtable shim + force path, BSPCGamepadDevice::Poll "
 			"byte patch). 7 hooks retired pending evidence; see "
 			"MOD_DIRECTION.md §3-4 and MAINTAINING.md §8.");
@@ -477,14 +514,24 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			try {
 				REL::Relocation<QLook_t> qLook(RE::Offset::UserEvents::QLook);
 				g_qLook = qLook.get();
+
+				REL::Relocation<std::uintptr_t> inputModeGlobalAddr(REL::Offset(0x5f657e0));
+				REL::Relocation<std::uintptr_t> inputModeObjectPtrAddr(REL::Offset(0x5fa1c10));
+				g_inputModeGlobal = reinterpret_cast<std::uint8_t*>(inputModeGlobalAddr.address());
+				const auto inputModeObject = *reinterpret_cast<std::uintptr_t*>(inputModeObjectPtrAddr.address());
+				g_inputModeObjectByte = inputModeObject ? reinterpret_cast<std::uint8_t*>(inputModeObject + 0x60) : nullptr;
+
 				g_forceArmed.store(true, std::memory_order_relaxed);
 				REX::INFO(
 					"force path armed: runtime {} is disasm-verified; QLook (AL {}) "
-					"resolved to {:#x}. rejected mouse/gamepad Look events will be "
-					"accepted (un-suppression on).",
+					"resolved to {:#x}; mode gate bytes global={:#x}, object+0x60={:#x}. "
+					"MouseMove will use temporary vanilla mode-spoof; rejected Thumbstick Look "
+					"events may still be force-accepted.",
 					runtimeVer.string("."sv),
 					RE::Offset::UserEvents::QLook.id(),
-					reinterpret_cast<std::uintptr_t>(g_qLook));
+					reinterpret_cast<std::uintptr_t>(g_qLook),
+					reinterpret_cast<std::uintptr_t>(g_inputModeGlobal),
+					reinterpret_cast<std::uintptr_t>(g_inputModeObjectByte));
 			} catch (const std::exception& ex) {
 				REX::WARN(
 					"force path NOT armed: QLook resolution failed ({}). "
@@ -580,7 +627,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	const auto patchedSites = g_byteSitesPatched.load();
 	if (skipped == 0) {
 		REX::INFO(
-			"v1.5.2 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
+			"v1.5.3 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
 			"installed at {} site(s), force path {}. shim invocations so far: {}. "
 			"play, then return SimultaneousInput-events.csv for analysis "
 			"(forced-accept count is in the 'forced' column).",
@@ -589,7 +636,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			g_shimInvocations.load(std::memory_order_relaxed));
 	} else {
 		REX::WARN(
-			"v1.5.2 partial: {}/{} hooks installed, {} skipped. plugin will "
+			"v1.5.3 partial: {}/{} hooks installed, {} skipped. plugin will "
 			"run with reduced behavior; see warnings above.",
 			installed,
 			installed + skipped,

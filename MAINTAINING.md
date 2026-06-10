@@ -255,3 +255,25 @@ traffic. If the spaz disappears, the next real fix must move below this gate
 and merge/scale mouse deltas correctly instead of blindly accepting MouseMove
 at `ShouldHandleEvent`. If the spaz remains, the fault is outside the force
 path and the CSV/log should prove it by showing `forced=0` for mouse rows.
+
+### 8.7 v1.5.3 — temporary vanilla mouse-mode spoof (2026-06-10)
+
+Anthony tested v1.5.2 and reported "no gyro now." Fresh log confirmed
+v1.5.2.0 build `e7f28248f22b` loaded and the CSV showed `forced=0` for all
+2,250 rows. The engine still saw 662 MouseMove/Mouse/Look rows, but vanilla
+rejected every one. This proves forced MouseMove was the only reason gyro moved
+in v1.5.0/v1.5.1, and also the likely source of the spaz.
+
+v1.5.3 stops blindly returning true for rejected MouseMove. For verified
+1.16.242 MouseMove/Mouse/Look events only, it temporarily writes the two
+verified mode-gate bytes (`RVA 0x5f657e0`, and `*RVA 0x5fa1c10 + 0x60`) to the
+mouse-accepted branch (`0`) while calling the original
+`LookHandler::ShouldHandleEvent`, then restores both bytes immediately. The
+intent is to let vanilla's own accept path and side effects/scaling run for
+mouse-look without leaving the game in KBM mode long enough to poison analog
+left-stick movement.
+
+If this restores gyro without spaz, the root cause was bypassing vanilla's
+accept-side effects. If it still spazzes, the issue is downstream of
+`ShouldHandleEvent` and the next step is payload logging / lower-level merge
+work around `OnMouseMoveEvent` rather than this gate.
