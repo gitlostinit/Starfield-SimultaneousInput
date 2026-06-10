@@ -1,0 +1,12 @@
+[07:34:11.250] [43884] [I] SimultaneousInput v1.5.0.0
+[07:34:11.250] [43884] [I] SimultaneousInput v1.5.0.0 (build ab1c9a54988d 2026-06-10T14:08:03Z)
+[07:34:11.250] [43884] [I] SFSE 0.2.20.0 loaded against Starfield runtime 1.16.242.0
+[07:34:11.250] [43884] [I] v1.5.0 un-suppress build: 2 hooks active (LookHandler vtable shim + force path, BSPCGamepadDevice::Poll byte patch). 7 hooks retired pending evidence; see MOD_DIRECTION.md §3-4 and MAINTAINING.md §8.
+[07:34:11.250] [43884] [W] runtime 1.16.242.0 is newer than the latest tested (1.16.236.0). hook 1 (vtable shim) and hook 2 (byte scan) are pattern-resilient but ABI changes will surface as crashes; if you are seeing crashes on a newer runtime, uninstall this plugin and report the runtime version in the issue.
+[07:34:11.251] [43884] [I] measurement CSV opened: C:\Users\Anthony\Documents\My Games\Starfield\SFSE\Logs\SimultaneousInput-events.csv
+[07:34:11.252] [43884] [I] force path armed: runtime 1.16.242.0 is disasm-verified; QLook (AL 74548) resolved to 0x7ff70603bd60. rejected mouse/gamepad Look events will be accepted (un-suppression on).
+[07:34:11.252] [43884] [I] hook 1 installed: LookHandler vtable slot 1 shim (orig 0x7ff70635cd80 chained through)
+[07:34:11.252] [43884] [I] hook 2 patched site: BSPCGamepadDevice::Poll +0x51d
+[07:34:11.252] [43884] [I] hook 2 patched site: BSPCGamepadDevice::Poll +0x5dc
+[07:34:11.252] [43884] [I] hook 2 installed: BSPCGamepadDevice::Poll patched 2 site(s)
+[07:34:11.252] [43884] [I] v1.5.0 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) installed at 2 site(s), force path ARMED. shim invocations so far: 0. play, then return SimultaneousInput-events.csv for analysis (forced-accept count is in the 'forced' column).

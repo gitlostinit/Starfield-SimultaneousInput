@@ -19,6 +19,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -354,30 +355,49 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 			isLook = look && *tag == *look;
 		}
 
+		// v1.5.1: force ONLY kMouseMove and kThumbstick. The 2026-06-10
+		// session (measurements/20260610) showed the mouse emits BOTH a
+		// MouseMove and a Look-tagged CursorMove per motion; v1.5.0 forced
+		// both, double-feeding the look pipeline every frame (2,143 of
+		// 3,346 frames). In gamepad mode the OS cursor is not captured at
+		// screen center, so the CursorMove path carries unbounded drifted
+		// positions — observed in-game as violent camera "spazzing" that
+		// scales with accumulated motion. CursorMove now always keeps the
+		// original's verdict (vanilla handles it correctly in the mode
+		// where it matters).
 		const auto deviceType = a_event->deviceType;
+		const auto eventType = a_event->eventType;
 		if (!origReturn && isLook &&
-		    (deviceType == RE::InputEvent::DeviceType::kMouse ||
-		     deviceType == RE::InputEvent::DeviceType::kGamepad)) {
+		    ((eventType == RE::InputEvent::EventType::kMouseMove &&
+		      deviceType == RE::InputEvent::DeviceType::kMouse) ||
+		     (eventType == RE::InputEvent::EventType::kThumbstick &&
+		      deviceType == RE::InputEvent::DeviceType::kGamepad))) {
 			forced = true;
 			g_forcedAccepts.fetch_add(1, std::memory_order_relaxed);
 		}
 
-		const auto eventType = a_event->eventType;
 		if (eventType == RE::InputEvent::EventType::kMouseMove) {
 			g_usingThumbstickLook.store(false, std::memory_order_relaxed);
 		} else if (eventType == RE::InputEvent::EventType::kThumbstick) {
 			g_usingThumbstickLook.store(true, std::memory_order_relaxed);
 		}
 
-		// The tag's interned char data is stable for the process lifetime
-		// (BSFixedString pool); logging it is safe outside the dispatch
-		// window.
+		// v1.5.1: the interned qword is an identity token, not guaranteed
+		// to be printable char data (the 2026-06-10 CSV contained raw
+		// binary). Log it as hex — still enough to group events by tag —
+		// and rely on `isLook` for the classification itself.
+		char tagHex[2 + 16 + 1] = "";
+		if (tag) {
+			std::snprintf(
+				tagHex, sizeof(tagHex), "0x%llx",
+				static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(*tag)));
+		}
 		measurement::LogEvent(
 			seq,
 			a_event->timeCode,
 			static_cast<std::uint32_t>(eventType),
 			static_cast<std::uint32_t>(a_event->deviceType),
-			std::string_view{ (tag && *tag) ? *tag : "" },
+			std::string_view{ tagHex },
 			origReturn,
 			g_usingThumbstickLook.load(std::memory_order_relaxed),
 			isLook,
@@ -407,7 +427,7 @@ namespace
 			runtimeVer.string("."sv));
 
 		REX::INFO(
-			"v1.5.0 un-suppress build: 2 hooks active "
+			"v1.5.1 un-suppress build: 2 hooks active "
 			"(LookHandler vtable shim + force path, BSPCGamepadDevice::Poll "
 			"byte patch). 7 hooks retired pending evidence; see "
 			"MOD_DIRECTION.md §3-4 and MAINTAINING.md §8.");
@@ -563,7 +583,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	const auto patchedSites = g_byteSitesPatched.load();
 	if (skipped == 0) {
 		REX::INFO(
-			"v1.5.0 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
+			"v1.5.1 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
 			"installed at {} site(s), force path {}. shim invocations so far: {}. "
 			"play, then return SimultaneousInput-events.csv for analysis "
 			"(forced-accept count is in the 'forced' column).",
@@ -572,7 +592,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			g_shimInvocations.load(std::memory_order_relaxed));
 	} else {
 		REX::WARN(
-			"v1.5.0 partial: {}/{} hooks installed, {} skipped. plugin will "
+			"v1.5.1 partial: {}/{} hooks installed, {} skipped. plugin will "
 			"run with reduced behavior; see warnings above.",
 			installed,
 			installed + skipped,

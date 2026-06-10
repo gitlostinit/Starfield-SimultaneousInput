@@ -218,3 +218,18 @@ build\...\build-fullhooks\Release\SimultaneousInput.dll`, built 21:03) but
 was never deployed — its 1.8.86-era byte offsets (+0x2A0, +0x0E, +0x68, …)
 do not exist on 1.16.242 (§7 table, unchanged by the 242 patch), and its
 `match_or_fail` on `Run_WindowsMessageLoop` aborts the load. Leave it.
+
+### 8.5 v1.5.1 — CursorMove double-feed fix (2026-06-10)
+
+First v1.5.0 field test: additive look WORKED (1,205 of 3,346 frames had
+stick + mouse look accepted together; engine stayed in gamepad mode, ~1
+mode flip in 69s) but the camera "spazzed out" with motion. Cause in the
+CSV: the mouse emits BOTH a kMouseMove and a Look-tagged kCursorMove per
+motion and v1.5.0 forced both (2,143 frames double-fed). In vanilla KBM
+mode the OS cursor is captured at screen center so the CursorMove path is
+benign; in gamepad mode the cursor drifts freely, so forced CursorMove
+events carry unbounded positions — violence scales with accumulated
+motion, matching the report. v1.5.1 forces only kMouseMove (mouse) and
+kThumbstick (gamepad); kCursorMove always keeps the original verdict.
+Also: CSV `userEvent` now logs the tag qword as hex (the interned token is
+not guaranteed printable; the 06-10 CSV contained raw binary).
