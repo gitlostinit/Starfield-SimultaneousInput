@@ -318,3 +318,18 @@ matched that: after /8 scaling, most forced MouseMove deltas were tiny
 
 v1.5.6 keeps the /8 attenuation but clamps post-scale MouseMove deltas to
 `x = +/-4`, `y = +/-2`. CursorMove still remains rejected.
+
+### 8.11 v1.5.7 — clamp vanilla MouseMove, suppress vanilla CursorMove, restore gamepad mode (2026-06-10)
+
+Anthony tested v1.5.6: still getting yanked in some circumstances, and if gyro
+starts before movement both sticks become slow/sluggish; if movement starts
+first gyro feels slow. The CSV explains it: once Starfield slips into mouse
+state, vanilla itself starts accepting raw MouseMove and CursorMove rows
+(`origReturn=1`) that bypass the v1.5.6 forced-path clamp. Those raw accepted
+MouseMove rows include huge y deltas (`y=173`, `-171`, etc.), and CursorMove is
+accepted too. That matches both the yanks and the stick poisoning.
+
+v1.5.7 applies the clamp to MouseMove regardless of whether vanilla accepted it
+or the shim forced it; suppresses CursorMove even when vanilla accepts it; and
+after mouse-look handling writes the verified mode-gate bytes back to gamepad
+(`1`) to avoid leaving the game in a KBM/mouse state that degrades sticks.

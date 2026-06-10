@@ -461,16 +461,35 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 	}
 
 	if (a_event) {
-		// v1.5.6: restore MouseMove forcing, but attenuate and clamp the packed
-		// signed delta payload at +0x38 first. v1.5.5 was mostly stable, but one
-		// rare post-scale spike (x=10,y=14) matched Anthony's floor/ceiling snap.
-		// Clamp X to +/-4 and Y tighter to +/-2. CursorMove remains rejected.
-		if (!origReturn && isLook &&
+		// v1.5.7: clamp MouseMove whether vanilla accepted it or the shim forces
+		// it, suppress CursorMove even if vanilla accepts it, and restore the
+		// verified mode-gate bytes to gamepad after mouse handling. v1.5.6 showed
+		// the remaining yanks came from vanilla-accepted raw MouseMove/CursorMove
+		// after the game slipped into mouse state.
+		if (isLook &&
 		    eventType == RE::InputEvent::EventType::kMouseMove &&
 		    deviceType == RE::InputEvent::DeviceType::kMouse) {
 			measurement::AttenuateMouseMove(const_cast<RE::InputEvent*>(a_event));
-			forced = true;
-			g_forcedAccepts.fetch_add(1, std::memory_order_relaxed);
+			if (!origReturn) {
+				forced = true;
+				g_forcedAccepts.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (g_inputModeGlobal) {
+				*g_inputModeGlobal = 1;
+			}
+			if (g_inputModeObjectByte) {
+				*g_inputModeObjectByte = 1;
+			}
+		} else if (isLook &&
+		           eventType == RE::InputEvent::EventType::kCursorMove &&
+		           deviceType == RE::InputEvent::DeviceType::kMouse) {
+			origReturn = false;
+			if (g_inputModeGlobal) {
+				*g_inputModeGlobal = 1;
+			}
+			if (g_inputModeObjectByte) {
+				*g_inputModeObjectByte = 1;
+			}
 		} else if (!origReturn && isLook &&
 		           eventType == RE::InputEvent::EventType::kThumbstick &&
 		           deviceType == RE::InputEvent::DeviceType::kGamepad) {
@@ -530,7 +549,7 @@ namespace
 			runtimeVer.string("."sv));
 
 		REX::INFO(
-			"v1.5.6 clamped-MouseMove build: 2 hooks active "
+			"v1.5.7 mouse-clamp-plus-cursor-suppress build: 2 hooks active "
 			"(LookHandler vtable shim + force path, BSPCGamepadDevice::Poll "
 			"byte patch). 7 hooks retired pending evidence; see "
 			"MOD_DIRECTION.md §3-4 and MAINTAINING.md §8.");
@@ -696,7 +715,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	const auto patchedSites = g_byteSitesPatched.load();
 	if (skipped == 0) {
 		REX::INFO(
-			"v1.5.6 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
+			"v1.5.7 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
 			"installed at {} site(s), force path {}. shim invocations so far: {}. "
 			"play, then return SimultaneousInput-events.csv for analysis "
 			"(forced-accept count is in the 'forced' column).",
@@ -705,7 +724,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			g_shimInvocations.load(std::memory_order_relaxed));
 	} else {
 		REX::WARN(
-			"v1.5.6 partial: {}/{} hooks installed, {} skipped. plugin will "
+			"v1.5.7 partial: {}/{} hooks installed, {} skipped. plugin will "
 			"run with reduced behavior; see warnings above.",
 			installed,
 			installed + skipped,
