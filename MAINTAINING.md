@@ -361,3 +361,18 @@ MouseMove attenuation to fractional accumulation: X and Y use `/16` with residue
 carried between packets and clamps of X +/-3, Y +/-2. This should preserve small
 Steam-profile movements over time rather than discarding them, while staying
 below the hot v1.5.7 gain that caused yanks.
+
+### 8.14 v1.5.10 — native-first mouse pass-through (2026-06-10)
+
+Anthony tested v1.5.9 and reported it still felt processed: horizontal panning
+could rubber-band/360 snap, vertical gyro stopped tracking mid-sweep, and even
+standing-still gyro no longer felt like the pre-plugin/native Steam gyro feel.
+That is the architectural guardrail: Steam Controller/Steam Deck profile
+settings must remain the source of truth for sensitivity, smoothing, activation,
+and curve. The plugin must not become the gyro tuning layer.
+
+v1.5.10 removes all MouseMove reshaping: no scale, clamp, fractional residue, or
+post-mouse mode-byte writeback. It force-accepts relative MouseMove as-is when
+vanilla rejects it, continues to suppress absolute CursorMove, and still permits
+look thumbstick acceptance. If yanking returns, the next fix should be temporal
+arbitration/handoff around right-stick/gamepad state, not mouse delta tuning.

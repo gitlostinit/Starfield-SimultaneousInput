@@ -243,8 +243,6 @@ namespace measurement
 	std::ofstream             g_csv;
 	std::mutex                g_csvMutex;
 	std::chrono::steady_clock::time_point g_t0;
-	float                     g_mouseResidX{ 0.0F };
-	float                     g_mouseResidY{ 0.0F };
 
 	struct RawProbe
 	{
@@ -274,39 +272,6 @@ namespace measurement
 		std::memcpy(&out.f30, base + 0x30, sizeof(out.f30));
 		std::memcpy(&out.f34, base + 0x34, sizeof(out.f34));
 		return out;
-	}
-
-	std::int32_t AttenuateDelta(
-		std::int32_t value,
-		float        divisor,
-		std::int32_t clampAbs,
-		float&       residue)
-	{
-		const auto total = static_cast<float>(value) / divisor + residue;
-		auto out = static_cast<std::int32_t>(total);  // truncates toward zero
-		out = std::clamp(out, -clampAbs, clampAbs);
-		residue = total - static_cast<float>(out);
-		if (value == 0 && std::abs(residue) < 0.0001F) {
-			residue = 0.0F;
-		}
-		return out;
-	}
-
-	void AttenuateMouseMove(RE::InputEvent* event)
-	{
-		if (!event) {
-			return;
-		}
-		auto* base = reinterpret_cast<std::byte*>(event);
-		std::uint64_t packed = 0;
-		std::memcpy(&packed, base + 0x38, sizeof(packed));
-		auto x = static_cast<std::int32_t>(packed & 0xffffffffULL);
-		auto y = static_cast<std::int32_t>((packed >> 32) & 0xffffffffULL);
-		x = AttenuateDelta(x, 16.0F, 3, g_mouseResidX);
-		y = AttenuateDelta(y, 16.0F, 2, g_mouseResidY);
-		packed = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(y)) << 32) |
-		         static_cast<std::uint32_t>(x);
-		std::memcpy(base + 0x38, &packed, sizeof(packed));
 	}
 
 	void Open()
@@ -467,35 +432,22 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 	}
 
 	if (a_event) {
-		// v1.5.7: clamp MouseMove whether vanilla accepted it or the shim forces
-		// it, suppress CursorMove even if vanilla accepts it, and restore the
-		// verified mode-gate bytes to gamepad after mouse handling. v1.5.6 showed
-		// the remaining yanks came from vanilla-accepted raw MouseMove/CursorMove
-		// after the game slipped into mouse state.
+		// v1.5.10: native-first mouse path. Do not rescale, clamp, accumulate,
+		// or otherwise reshape Steam's relative MouseMove deltas, and do not
+		// force-write Starfield's mode bytes after mouse packets. Steam profile
+		// settings must remain the source of truth for gyro feel. The only mouse
+		// safety intervention here is suppressing absolute CursorMove traffic.
 		if (isLook &&
 		    eventType == RE::InputEvent::EventType::kMouseMove &&
 		    deviceType == RE::InputEvent::DeviceType::kMouse) {
-			measurement::AttenuateMouseMove(const_cast<RE::InputEvent*>(a_event));
 			if (!origReturn) {
 				forced = true;
 				g_forcedAccepts.fetch_add(1, std::memory_order_relaxed);
-			}
-			if (g_inputModeGlobal) {
-				*g_inputModeGlobal = 1;
-			}
-			if (g_inputModeObjectByte) {
-				*g_inputModeObjectByte = 1;
 			}
 		} else if (isLook &&
 		           eventType == RE::InputEvent::EventType::kCursorMove &&
 		           deviceType == RE::InputEvent::DeviceType::kMouse) {
 			origReturn = false;
-			if (g_inputModeGlobal) {
-				*g_inputModeGlobal = 1;
-			}
-			if (g_inputModeObjectByte) {
-				*g_inputModeObjectByte = 1;
-			}
 		} else if (!origReturn && isLook &&
 		           eventType == RE::InputEvent::EventType::kThumbstick &&
 		           deviceType == RE::InputEvent::DeviceType::kGamepad) {
@@ -555,7 +507,7 @@ namespace
 			runtimeVer.string("."sv));
 
 		REX::INFO(
-			"v1.5.9 fractional-mouse-plus-cursor-suppress build: 2 hooks active "
+			"v1.5.10 native-mouse-plus-cursor-suppress build: 2 hooks active "
 			"(LookHandler vtable shim + force path, BSPCGamepadDevice::Poll "
 			"byte patch). 7 hooks retired pending evidence; see "
 			"MOD_DIRECTION.md §3-4 and MAINTAINING.md §8.");
@@ -721,7 +673,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	const auto patchedSites = g_byteSitesPatched.load();
 	if (skipped == 0) {
 		REX::INFO(
-			"v1.5.9 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
+			"v1.5.10 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
 			"installed at {} site(s), force path {}. shim invocations so far: {}. "
 			"play, then return SimultaneousInput-events.csv for analysis "
 			"(forced-accept count is in the 'forced' column).",
@@ -730,7 +682,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			g_shimInvocations.load(std::memory_order_relaxed));
 	} else {
 		REX::WARN(
-			"v1.5.9 partial: {}/{} hooks installed, {} skipped. plugin will "
+			"v1.5.10 partial: {}/{} hooks installed, {} skipped. plugin will "
 			"run with reduced behavior; see warnings above.",
 			installed,
 			installed + skipped,
