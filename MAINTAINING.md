@@ -391,3 +391,18 @@ what destroyed native standing-still gyro feel. Expected tradeoff: left stick ma
 again flip active device or degrade simultaneous input, but gyro-alone should be
 closer to the true Steam mouse path. If gyro-alone is restored, reintroduce
 simultaneous movement via temporal arbitration instead of global byte patching.
+
+### 8.16 v1.5.12 — no forced MouseMove safe baseline (2026-06-10)
+
+Anthony tested v1.5.11 and gyro still spazzed any time activated. The CSV showed
+Hook 2 removal did not fix it: every MouseMove was still `origReturn=0` and
+`forced=1`, with raw Steam gyro deltas up to about X +/-52 and Y +/-50. That
+proves the unsafe behavior is force-accepting rejected MouseMove itself, not only
+the gamepad byte patch or our post-processing.
+
+v1.5.12 removes forced MouseMove acceptance entirely. It leaves MouseMove as
+measurement-only, continues suppressing absolute CursorMove, keeps Hook 2
+disabled, and still allows gamepad Look force acceptance. This is a safe baseline
+intended to stop camera spazz while preserving logs for the next architectural
+approach. If gyro no longer works, expected; the next solution must find a
+vanilla/native mouse-mode path or a safer temporal handoff, not raw force-accept.
