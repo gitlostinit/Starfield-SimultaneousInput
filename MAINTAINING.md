@@ -424,3 +424,19 @@ re-enables only the `BSPCGamepadDevice::Poll` byte patch. Hypothesis: Anthony's
 Steam profile keyboard-touch primes native mouse mode; the byte patch may stop
 left/right stick gamepad activity from stealing active-device state back, avoiding
 the lift/re-touch requirement without reintroducing forced raw mouse spazz.
+
+### 8.18 v1.5.14 — telemetry-only mode-byte logging over v1.5.12 baseline (2026-06-10)
+
+Anthony reported on restored v1.5.12 that the game still behaves like a binary
+state machine: either gyro works or joysticks work. Starting with gyro lets the
+joysticks work fairly reliably, but once joystick/gamepad wins, returning to gyro
+is bad until a keyboard/touch re-prime. The latest v1.5.12 log showed exactly
+that: keyboard/touch events correlate with vanilla-accepted MouseMove, while
+MoveStick/right-stick activity flips MouseMove back to rejected.
+
+v1.5.14 intentionally makes no behavior change from the v1.5.12 safe baseline:
+MouseMove is never force-accepted, CursorMove is still suppressed, and Hook 2
+remains disabled because v1.5.13 crippled movement/right-stick. The only change
+is CSV telemetry: modeGlobalBefore/modeObjectBefore/modeGlobalAfter/modeObjectAfter
+columns are logged around the original LookHandler decision so the next patch can
+target the actual mode transition instead of guessing.
