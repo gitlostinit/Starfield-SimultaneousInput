@@ -440,3 +440,48 @@ remains disabled because v1.5.13 crippled movement/right-stick. The only change
 is CSV telemetry: modeGlobalBefore/modeObjectBefore/modeGlobalAfter/modeObjectAfter
 columns are logged around the original LookHandler decision so the next patch can
 target the actual mode transition instead of guessing.
+
+### 8.19 v1.5.15 — probe LookHandler instance bytes (2026-06-11)
+
+Post-analysis of v1.5.14 CSV data showed the two mode-gate bytes (global=0x5f657e0=0,
+object+0x60=72) were constant across ALL 5,508 events in the session — including across
+six MouseMove origReturn transitions (0→1 and 1→0). The mode bytes are definitively NOT
+the active mode gate; the original ShouldHandleEvent is reading its accept/reject decision
+from elsewhere.
+
+Key v1.5.14 findings (2026-06-11 analysis):
+- KeyCode 190 = '.' (period) was the capacitive-touch keyboard binding: every 0→1 transition
+  (mouse becomes accepted) was immediately preceded by Char/Kbd + Button/Kbd events carrying
+  that scancode. This confirms Anthony's Steam profile binding is functioning and is the prime.
+- Spontaneous 1→0 transitions (mouse becomes rejected) occurred without any visible LookHandler
+  events in a 30-event lookback window, suggesting BSPCGamepadDevice::Poll writes to the
+  mode gate outside the shim's view. Hook 2 is disabled in v1.5.14 so Poll freely writes
+  `[BSPCGamepadDevice+8]=1` on any left-stick activity.
+- The object at *RVA 0x5fa1c10+0x60 = 72 (0x48) is a non-mode value (device count? padding?);
+  reading it was not informative. The actual mode gate is unknown.
+
+v1.5.15 adds probing of the LookHandler object instance (`a_self`) at offsets
++0x38 through +0x58, both BEFORE and AFTER calling the original ShouldHandleEvent.
+BSInputEventUser (the base class) is 0x40 bytes; LookHandler-specific fields
+start at +0x40. If any a_self byte changes between keyboard-primed "accept" state
+and gamepad-active "reject" state, that byte is the real mode gate. The before/after
+split also reveals any side-effect writes the original makes (e.g., updating a
+"last accepted device" field as part of its dispatch).
+
+No behavior change from v1.5.12/v1.5.14: MouseMove never force-accepted, CursorMove
+suppressed, Hook 2 disabled.
+
+**Test instructions for Anthony:**
+1. Deploy v1.5.15 (CI artifact from this commit).
+2. Launch Starfield via sfse_loader.exe.
+3. Touch right stick capacitive sensor (key '.') to prime gyro — verify gyro works.
+4. Move left stick (joystick) — verify gyro stops.
+5. Touch right stick again — verify gyro resumes.
+6. Exit Starfield. Send SimultaneousInput-events.csv and SimultaneousInput.log.
+
+**Analysis target:** In the CSV, compare sB38pre/sB40pre/sB44pre/sB48pre/sB4Cpre/sB50pre/sB58pre
+values between rows where origReturn=1 (accepted) vs origReturn=0 (rejected) for
+MouseMove/Mouse events. The byte that differs between accepted and rejected states
+is the real mode gate. Also check pre vs pst columns on Button/Kbd events — any
+byte that changes between pre and pst of a keyboard event is a side-effect write
+by the original ShouldHandleEvent that sets the mouse mode.

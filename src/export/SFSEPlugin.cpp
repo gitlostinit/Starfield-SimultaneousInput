@@ -110,6 +110,12 @@ namespace RE
 namespace
 {
 	std::atomic<bool> g_usingThumbstickLook{ false };
+
+	// v1.5.15: track the deviceType of the previous event seen by the shim.
+	// Lets post-analysis identify "event immediately following a keyboard
+	// button" without requiring a window query — key for correlating keyboard
+	// touch-priming with the mode transition in the next event.
+	std::atomic<std::uint32_t> g_prevEventDevType{ 0xFFFFFFFFu };
 }
 
 // === Hook-1 chain-through pointer ===
@@ -274,6 +280,45 @@ namespace measurement
 		return out;
 	}
 
+	// v1.5.15: probe bytes from the LookHandler instance (a_self).
+	// BSInputEventUser (the base class) is 0x40 bytes; LookHandler-specific
+	// fields begin at +0x40. We read seven bytes at measured offsets, both
+	// before and after calling the original ShouldHandleEvent, to reveal:
+	//   (a) which byte the original reads to decide accept/reject (correlates
+	//       with origReturn across events), and
+	//   (b) which byte the original writes as a side-effect (differs between
+	//       the pre/post columns of the same call).
+	// Reading past the object's true end is safe in practice: heap allocations
+	// are always followed by either another allocation or guard pages, never a
+	// fault on a modest overread within the same cache line.
+	struct SelfProbe
+	{
+		std::uint8_t b38{ 0 };
+		std::uint8_t b40{ 0 };
+		std::uint8_t b44{ 0 };
+		std::uint8_t b48{ 0 };
+		std::uint8_t b4C{ 0 };
+		std::uint8_t b50{ 0 };
+		std::uint8_t b58{ 0 };
+	};
+
+	SelfProbe ProbeSelf(const void* a_self)
+	{
+		SelfProbe out{};
+		if (!a_self) {
+			return out;
+		}
+		const auto* base = reinterpret_cast<const std::byte*>(a_self);
+		std::memcpy(&out.b38, base + 0x38, 1);
+		std::memcpy(&out.b40, base + 0x40, 1);
+		std::memcpy(&out.b44, base + 0x44, 1);
+		std::memcpy(&out.b48, base + 0x48, 1);
+		std::memcpy(&out.b4C, base + 0x4C, 1);
+		std::memcpy(&out.b50, base + 0x50, 1);
+		std::memcpy(&out.b58, base + 0x58, 1);
+		return out;
+	}
+
 	void Open()
 	{
 		try {
@@ -299,7 +344,17 @@ namespace measurement
 				REX::WARN("measurement CSV failed to open: {}", path.string());
 				return;
 			}
-			g_csv << "seq,wall_ms,timeCode,eventType,deviceType,userEvent,origReturn,latched,isLook,forced,modeGlobalBefore,modeObjectBefore,modeGlobalAfter,modeObjectAfter,q28,q30,q38,q40,f28,f2c,f30,f34\n";
+			// v1.5.15 adds SelfProbe columns (a_self bytes before/after the
+			// original call) and prevDevType. The "pre" columns show what the
+			// original ShouldHandleEvent found; "pst" columns show what it left.
+			// Any "pre" byte that correlates with origReturn is the mode gate.
+			// Any byte that differs between "pre" and "pst" is a side-effect write.
+			g_csv << "seq,wall_ms,timeCode,eventType,deviceType,userEvent,origReturn,latched,isLook,forced,"
+			         "modeGlobalBefore,modeObjectBefore,modeGlobalAfter,modeObjectAfter,"
+			         "sB38pre,sB40pre,sB44pre,sB48pre,sB4Cpre,sB50pre,sB58pre,"
+			         "sB38pst,sB40pst,sB44pst,sB48pst,sB4Cpst,sB50pst,sB58pst,"
+			         "prevDevType,"
+			         "q28,q30,q38,q40,f28,f2c,f30,f34\n";
 			g_csv.flush();
 			REX::INFO("measurement CSV opened: {}", path.string());
 		} catch (const std::exception& ex) {
@@ -321,6 +376,9 @@ namespace measurement
 		int                 modeObjectBefore,
 		int                 modeGlobalAfter,
 		int                 modeObjectAfter,
+		SelfProbe           selfPre,
+		SelfProbe           selfPost,
+		std::uint32_t       prevDevType,
 		RawProbe            raw)
 	{
 		// Mutex-guarded line write. Worst-case throughput in the §4.2 test
@@ -336,12 +394,22 @@ namespace measurement
 		const auto wallMs = std::chrono::duration_cast<std::chrono::milliseconds>(
 		                        std::chrono::steady_clock::now() - g_t0)
 		                        .count();
+		const auto prevDevStr = (prevDevType == 0xFFFFFFFFu) ? -1 : static_cast<int>(prevDevType);
 		g_csv << seq << ',' << wallMs << ',' << timeCode << ','
 		      << eventType << ',' << deviceType << ',' << userEvent << ','
 		      << (origReturn ? 1 : 0) << ',' << (latched ? 1 : 0) << ','
 		      << (isLook ? 1 : 0) << ',' << (forced ? 1 : 0) << ','
 		      << modeGlobalBefore << ',' << modeObjectBefore << ','
 		      << modeGlobalAfter << ',' << modeObjectAfter << ','
+		      << static_cast<int>(selfPre.b38) << ',' << static_cast<int>(selfPre.b40) << ','
+		      << static_cast<int>(selfPre.b44) << ',' << static_cast<int>(selfPre.b48) << ','
+		      << static_cast<int>(selfPre.b4C) << ',' << static_cast<int>(selfPre.b50) << ','
+		      << static_cast<int>(selfPre.b58) << ','
+		      << static_cast<int>(selfPost.b38) << ',' << static_cast<int>(selfPost.b40) << ','
+		      << static_cast<int>(selfPost.b44) << ',' << static_cast<int>(selfPost.b48) << ','
+		      << static_cast<int>(selfPost.b4C) << ',' << static_cast<int>(selfPost.b50) << ','
+		      << static_cast<int>(selfPost.b58) << ','
+		      << prevDevStr << ','
 		      << raw.q28 << ',' << raw.q30 << ',' << raw.q38 << ',' << raw.q40 << ','
 		      << raw.f28 << ',' << raw.f2c << ',' << raw.f30 << ',' << raw.f34 << '\n';
 		// No flush() per row: spilled events on a process crash are
@@ -407,6 +475,12 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 	const int modeGlobalBefore = g_inputModeGlobal ? static_cast<int>(*g_inputModeGlobal) : -1;
 	const int modeObjectBefore = g_inputModeObjectByte ? static_cast<int>(*g_inputModeObjectByte) : -1;
 
+	// v1.5.15: read LookHandler instance bytes before calling original.
+	// Offsets +0x38 (BSInputEventUser::inputEventHandlingEnabled) and
+	// +0x40 through +0x58 (LookHandler-specific fields). If any byte here
+	// correlates with origReturn across events, it is the mode gate.
+	const auto selfPre = measurement::ProbeSelf(a_self);
+
 	bool origReturn = false;
 	if (g_origShouldHandleEvent) {
 		// v1.5.4 measurement: do not blindly force mouse-look after vanilla rejects it.
@@ -439,6 +513,9 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 			*g_inputModeObjectByte = oldObject;
 		}
 	}
+
+	// Read a_self bytes AFTER the original call to capture any side-effect writes.
+	const auto selfPost = measurement::ProbeSelf(a_self);
 
 	const int modeGlobalAfter = g_inputModeGlobal ? static_cast<int>(*g_inputModeGlobal) : -1;
 	const int modeObjectAfter = g_inputModeObjectByte ? static_cast<int>(*g_inputModeObjectByte) : -1;
@@ -494,7 +571,15 @@ static bool LookHandler_ShouldHandleEvent_Shim(
 			modeObjectBefore,
 			modeGlobalAfter,
 			modeObjectAfter,
+			selfPre,
+			selfPost,
+			g_prevEventDevType.load(std::memory_order_relaxed),
 			measurement::ProbeRaw(a_event));
+
+		// v1.5.15: update prevDevType for the NEXT event's row.
+		g_prevEventDevType.store(
+			static_cast<std::uint32_t>(a_event->deviceType),
+			std::memory_order_relaxed);
 	}
 
 	return origReturn || forced;
@@ -520,9 +605,11 @@ namespace
 			runtimeVer.string("."sv));
 
 		REX::INFO(
-			"v1.5.14 telemetry-only no-forced-mouse build: 1 hook active "
+			"v1.5.15 telemetry-widened build: 1 hook active "
 			"(LookHandler vtable shim measurement/safety only; MouseMove is never "
-			"force-accepted; gamepad byte patch disabled). 7 hooks retired pending evidence; see "
+			"force-accepted; gamepad byte patch disabled). "
+			"CSV now includes LookHandler a_self bytes (sB38-sB58 pre/post) and prevDevType "
+			"to identify the actual mode gate. 7 hooks retired pending evidence; see "
 			"MOD_DIRECTION.md §3-4 and MAINTAINING.md §8.");
 
 		// Highest runtime CommonLibSF advertises support for. Out-of-range is
@@ -627,14 +714,14 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 		++g_hooksSkipped;
 	}
 
-	// v1.5.14 telemetry baseline: do NOT install Hook 2. v1.5.13 proved the
+	// v1.5.15 telemetry baseline: do NOT install Hook 2. v1.5.13 proved the
 	// BSPCGamepadDevice::Poll byte patch cripples analog magnitude/right-stick
 	// behavior. Keep this build behavior-equivalent to v1.5.12, with only extra
 	// mode-byte logging added to the CSV.
 	g_byteSitesPatched.store(0, std::memory_order_relaxed);
 	++g_hooksSkipped;
 	REX::INFO(
-		"hook 2 intentionally disabled in v1.5.14: BSPCGamepadDevice::Poll byte "
+		"hook 2 intentionally disabled in v1.5.15: BSPCGamepadDevice::Poll byte "
 		"patch not installed; this build is telemetry-only over the v1.5.12 safe "
 		"baseline.");
 
@@ -643,16 +730,17 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	const auto patchedSites = g_byteSitesPatched.load();
 	if (skipped == 0) {
 		REX::INFO(
-			"v1.5.14 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
+			"v1.5.15 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
 			"installed at {} site(s), force path {}. shim invocations so far: {}. "
-			"play, then return SimultaneousInput-events.csv for analysis "
-			"(forced-accept count is in the 'forced' column).",
+			"play (touch right stick to prime gyro), then return SimultaneousInput-events.csv. "
+			"Look for sB38pre/sB40pre/sB44pre/sB48pre/sB4Cpre/sB50pre/sB58pre changing "
+			"at the Mouse <-> Thumbstick origReturn transitions to identify the real mode gate.",
 			patchedSites,
 			g_forceArmed.load(std::memory_order_relaxed) ? "ARMED" : "off (measurement-only)",
 			g_shimInvocations.load(std::memory_order_relaxed));
 	} else {
 		REX::WARN(
-			"v1.5.14 partial: {}/{} hooks installed, {} skipped. plugin will "
+			"v1.5.15 partial: {}/{} hooks installed, {} skipped. plugin will "
 			"run with reduced behavior; see warnings above.",
 			installed,
 			installed + skipped,
