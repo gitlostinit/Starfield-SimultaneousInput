@@ -406,3 +406,21 @@ disabled, and still allows gamepad Look force acceptance. This is a safe baselin
 intended to stop camera spazz while preserving logs for the next architectural
 approach. If gyro no longer works, expected; the next solution must find a
 vanilla/native mouse-mode path or a safer temporal handoff, not raw force-accept.
+
+### 8.17 v1.5.13 — no forced MouseMove + gamepad byte patch (2026-06-10)
+
+Anthony tested v1.5.12: camera returned to a safe working baseline. Gyro works
+as expected when a keyboard input is held, including via Steam profile binding a
+period/key touch to the right-stick capacitive touch. However Starfield still
+visibly switches between gamepad and mouse modes; once gamepad wins, gyro must be
+reactivated by lifting/re-touching the capacitive sensor.
+
+v1.5.12 logs showed keyboard device button events correlate with vanilla-accepted
+MouseMove (`origReturn=1`). This proves the target path is native Starfield mouse
+acceptance under a keyboard/touch-prime, not plugin force-accepting MouseMove.
+
+v1.5.13 keeps MouseMove force-accept disabled, keeps CursorMove suppressed, and
+re-enables only the `BSPCGamepadDevice::Poll` byte patch. Hypothesis: Anthony's
+Steam profile keyboard-touch primes native mouse mode; the byte patch may stop
+left/right stick gamepad activity from stealing active-device state back, avoiding
+the lift/re-touch requirement without reintroducing forced raw mouse spazz.

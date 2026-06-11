@@ -504,9 +504,9 @@ namespace
 			runtimeVer.string("."sv));
 
 		REX::INFO(
-			"v1.5.12 no-forced-mouse safe-baseline build: 1 hook active "
-			"(LookHandler vtable shim + force path only; BSPCGamepadDevice::Poll "
-			"byte patch disabled). 7 hooks retired pending evidence; see "
+			"v1.5.13 no-forced-mouse-plus-gamepad-bytepatch build: 2 hooks active "
+			"(LookHandler vtable shim measurement/safety + BSPCGamepadDevice::Poll "
+			"byte patch; MouseMove is never force-accepted). 7 hooks retired pending evidence; see "
 			"MOD_DIRECTION.md §3-4 and MAINTAINING.md §8.");
 
 		// Highest runtime CommonLibSF advertises support for. Out-of-range is
@@ -611,24 +611,57 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 		++g_hooksSkipped;
 	}
 
-	// v1.5.12 diagnostic: do NOT install Hook 2. The byte patch keeps the
-	// gamepad active-device path from flipping, but Anthony reported that even
-	// standing-still gyro no longer felt native once our recent builds were
-	// installed. Skipping this patch tests whether that active-device meddling
-	// is what prevents Steam's mouse gyro from behaving like normal mouse mode.
-	g_byteSitesPatched.store(0, std::memory_order_relaxed);
-	++g_hooksSkipped;
-	REX::INFO(
-		"hook 2 intentionally disabled in v1.5.12: BSPCGamepadDevice::Poll byte "
-		"patch not installed; left stick may flip active device, but gyro-alone "
-		"should be closer to native mouse behavior.");
+	// === Hook 2: BSPCGamepadDevice::Poll byte patch (BOTH anchor sites) ===
+	// v1.5.13 re-enables the active-device byte patch, but keeps MouseMove
+	// force-accept disabled. The intended path is Anthony's Steam profile
+	// keyboard-touch workaround: keyboard/touch primes Starfield's native mouse
+	// path, while this patch tests whether gamepad movement can be prevented
+	// from stealing active-device state back and forcing a capacitive lift/re-tap.
+	try {
+		REL::Relocation<std::uintptr_t> head(RE::Offset::BSPCGamepadDevice::Poll);
+		constexpr std::size_t           kScanLimit = 0x800;
+		const std::uint8_t*             p = reinterpret_cast<const std::uint8_t*>(head.address());
+		unsigned                        patched = 0;
+		for (std::size_t i = 0; i + 4 <= kScanLimit; ++i) {
+			if (p[i] == 0xC6 && p[i + 1] == 0x43 && p[i + 2] == 0x08 && p[i + 3] == 0x01) {
+				REL::Relocation<std::uintptr_t> hook(
+					RE::Offset::BSPCGamepadDevice::Poll, static_cast<std::ptrdiff_t>(i));
+				hook.write_fill(REL::NOP, 0x4);
+				REX::INFO("hook 2 patched site: BSPCGamepadDevice::Poll +{:#x}", i);
+				++patched;
+			}
+		}
+		g_byteSitesPatched.store(patched, std::memory_order_relaxed);
+		if (patched == 0) {
+			REX::WARN(
+				"hook 2 skipped: BSPCGamepadDevice::Poll AL id {} (rva {:#x}) "
+				"anchor 'C6 43 08 01' not found in first {:#x} bytes; left stick "
+				"may still flip active-device state.",
+				RE::Offset::BSPCGamepadDevice::Poll.id(),
+				RE::Offset::BSPCGamepadDevice::Poll.offset(),
+				kScanLimit);
+			++g_hooksSkipped;
+		} else {
+			REX::INFO("hook 2 installed: BSPCGamepadDevice::Poll patched {} site(s)", patched);
+			++g_hooksInstalled;
+			if (patched < 2) {
+				REX::WARN(
+					"hook 2 partial: expected 2 anchor sites, found {}. left-stick "
+					"active-device latch may still fire from the missing site.",
+					patched);
+			}
+		}
+	} catch (const std::exception& ex) {
+		REX::ERROR("hook 2 install failed: {}", ex.what());
+		++g_hooksSkipped;
+	}
 
 	const auto installed = g_hooksInstalled.load();
 	const auto skipped = g_hooksSkipped.load();
 	const auto patchedSites = g_byteSitesPatched.load();
 	if (skipped == 0) {
 		REX::INFO(
-			"v1.5.12 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
+			"v1.5.13 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
 			"installed at {} site(s), force path {}. shim invocations so far: {}. "
 			"play, then return SimultaneousInput-events.csv for analysis "
 			"(forced-accept count is in the 'forced' column).",
@@ -637,7 +670,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			g_shimInvocations.load(std::memory_order_relaxed));
 	} else {
 		REX::WARN(
-			"v1.5.12 partial: {}/{} hooks installed, {} skipped. plugin will "
+			"v1.5.13 partial: {}/{} hooks installed, {} skipped. plugin will "
 			"run with reduced behavior; see warnings above.",
 			installed,
 			installed + skipped,
