@@ -376,3 +376,18 @@ post-mouse mode-byte writeback. It force-accepts relative MouseMove as-is when
 vanilla rejects it, continues to suppress absolute CursorMove, and still permits
 look thumbstick acceptance. If yanking returns, the next fix should be temporal
 arbitration/handoff around right-stick/gamepad state, not mouse delta tuning.
+
+### 8.15 v1.5.11 — disable gamepad byte patch diagnostic (2026-06-10)
+
+Anthony tested v1.5.10: native pass-through MouseMove immediately spazzed when
+capacitive gyro activated. The v1.5.10 CSV showed raw forced MouseMove deltas up
+to about X +/-30 and Y +/-51. Starfield can tolerate those in normal mouse mode
+(Anthony's pre-plugin standing-still gyro felt beautiful), but not when our
+mixed-input force path/active-device state is involved.
+
+v1.5.11 disables Hook 2 (`BSPCGamepadDevice::Poll` byte patch) entirely while
+keeping the LookHandler shim. This tests whether the active-device byte patch is
+what destroyed native standing-still gyro feel. Expected tradeoff: left stick may
+again flip active device or degrade simultaneous input, but gyro-alone should be
+closer to the true Steam mouse path. If gyro-alone is restored, reintroduce
+simultaneous movement via temporal arbitration instead of global byte patching.
