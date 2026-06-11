@@ -243,6 +243,8 @@ namespace measurement
 	std::ofstream             g_csv;
 	std::mutex                g_csvMutex;
 	std::chrono::steady_clock::time_point g_t0;
+	float                     g_mouseResidX{ 0.0F };
+	float                     g_mouseResidY{ 0.0F };
 
 	struct RawProbe
 	{
@@ -274,16 +276,20 @@ namespace measurement
 		return out;
 	}
 
-	std::int32_t AttenuateDelta(std::int32_t value, std::int32_t divisor, std::int32_t clampAbs)
+	std::int32_t AttenuateDelta(
+		std::int32_t value,
+		float        divisor,
+		std::int32_t clampAbs,
+		float&       residue)
 	{
-		if (value == 0) {
-			return 0;
+		const auto total = static_cast<float>(value) / divisor + residue;
+		auto out = static_cast<std::int32_t>(total);  // truncates toward zero
+		out = std::clamp(out, -clampAbs, clampAbs);
+		residue = total - static_cast<float>(out);
+		if (value == 0 && std::abs(residue) < 0.0001F) {
+			residue = 0.0F;
 		}
-		// v1.5.8 deliberately does NOT preserve +/-1 for tiny deltas. v1.5.7
-		// proved the stream was still too hot even after spike clamping, so
-		// small jitter should be allowed to drop to zero.
-		auto scaled = value / divisor;
-		return std::clamp(scaled, -clampAbs, clampAbs);
+		return out;
 	}
 
 	void AttenuateMouseMove(RE::InputEvent* event)
@@ -296,8 +302,8 @@ namespace measurement
 		std::memcpy(&packed, base + 0x38, sizeof(packed));
 		auto x = static_cast<std::int32_t>(packed & 0xffffffffULL);
 		auto y = static_cast<std::int32_t>((packed >> 32) & 0xffffffffULL);
-		x = AttenuateDelta(x, 24, 2);
-		y = AttenuateDelta(y, 32, 1);
+		x = AttenuateDelta(x, 16.0F, 3, g_mouseResidX);
+		y = AttenuateDelta(y, 16.0F, 2, g_mouseResidY);
 		packed = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(y)) << 32) |
 		         static_cast<std::uint32_t>(x);
 		std::memcpy(base + 0x38, &packed, sizeof(packed));
@@ -549,7 +555,7 @@ namespace
 			runtimeVer.string("."sv));
 
 		REX::INFO(
-			"v1.5.8 low-gain-mouse-plus-cursor-suppress build: 2 hooks active "
+			"v1.5.9 fractional-mouse-plus-cursor-suppress build: 2 hooks active "
 			"(LookHandler vtable shim + force path, BSPCGamepadDevice::Poll "
 			"byte patch). 7 hooks retired pending evidence; see "
 			"MOD_DIRECTION.md §3-4 and MAINTAINING.md §8.");
@@ -715,7 +721,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 	const auto patchedSites = g_byteSitesPatched.load();
 	if (skipped == 0) {
 		REX::INFO(
-			"v1.5.8 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
+			"v1.5.9 ready: hook 1 (vtable shim) installed, hook 2 (byte patch) "
 			"installed at {} site(s), force path {}. shim invocations so far: {}. "
 			"play, then return SimultaneousInput-events.csv for analysis "
 			"(forced-accept count is in the 'forced' column).",
@@ -724,7 +730,7 @@ extern "C" DLLEXPORT bool SFSEAPI SFSEPlugin_Load(const SFSE::LoadInterface* a_s
 			g_shimInvocations.load(std::memory_order_relaxed));
 	} else {
 		REX::WARN(
-			"v1.5.8 partial: {}/{} hooks installed, {} skipped. plugin will "
+			"v1.5.9 partial: {}/{} hooks installed, {} skipped. plugin will "
 			"run with reduced behavior; see warnings above.",
 			installed,
 			installed + skipped,

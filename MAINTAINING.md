@@ -346,3 +346,18 @@ and fighting the native stick path, not one-off unbounded CursorMove spikes.
 v1.5.8 changes the MouseMove attenuation from /8 with +/-1 preservation to a
 low-gain path: X is `/24` clamped to +/-2, Y is `/32` clamped to +/-1, and tiny
 nonzero deltas are allowed to drop to zero. CursorMove remains suppressed.
+
+### 8.13 v1.5.9 — fractional low/mid-gain mouse injection (2026-06-10)
+
+Anthony tested v1.5.8: no yanking and overall better, but gyro became slow,
+sticky, poor vertically, and bad diagonally. The v1.5.8 CSV confirmed why:
+~42% of forced MouseMove packets became `(0,0)` after scaling, X was zeroed
+~54% of the time, and Y was zeroed ~80% of the time. That destroyed Steam's
+already-shaped gyro curve and made fine movement stick until a larger delta
+arrived.
+
+v1.5.9 keeps CursorMove suppressed and keeps gain lower than v1.5.7, but changes
+MouseMove attenuation to fractional accumulation: X and Y use `/16` with residue
+carried between packets and clamps of X +/-3, Y +/-2. This should preserve small
+Steam-profile movements over time rather than discarding them, while staying
+below the hot v1.5.7 gain that caused yanks.
